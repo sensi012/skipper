@@ -1,0 +1,25 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts & coverage
+*.out
+coverage.txt
+.coverage/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Local platform runtime databases
+.app-platform/
+
+# IDE & Editor folders
+.idea/
+.vscode/
+*.swp
+*~

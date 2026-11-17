@@ -1,0 +1,30 @@
+version: "v1alpha1"
+name: "sample-service"
+team: "platform"
+type: "service"
+
+endpoints:
+  - name: "http"
+    port: 8080
+    public: true
+
+env:
+  - name: "PORT"
+    value: "8080"
+  - name: "APP_ENV"
+    value: "development"
+
+runtime:
+  replicas:
+    min: 1
+    max: 3
+  resources:
+    cpu:
+      request: "100m"
+      limit: "500m"
+    memory:
+      request: "128Mi"
+      limit: "512Mi"
+
+security:
+  runAsNonRoot: true

@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unified-platform.dev/schemas/skipper.v1alpha1.json",
+  "title": "SkipperIntentSpecification",
+  "description": "Skipper platform application intent specification (skipper.yaml)",
+  "type": "object",
+  "required": ["version", "name", "type"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": ["v1alpha1", "v1"]
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+    "team": {
+      "type": "string"
+    },
+    "environment": {
+      "type": "string",
+      "enum": ["local", "development", "staging", "production"],
+      "default": "local"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["service", "worker", "job", "cronjob"],
+      "default": "service"
+    },
+    "build": {
+      "type": "object",
+      "properties": {
+        "context": { "type": "string", "default": "." },
+        "builder": { "type": "string" },
+        "dockerfile": { "type": "string" },
+        "args": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "image": {
+      "type": "string"
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "replicas": {
+          "type": "object",
+          "properties": {
+            "min": { "type": "integer", "minimum": 1, "default": 1 },
+            "max": { "type": "integer", "minimum": 1, "default": 1 },
+            "targetCPUUtilization": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": "object",
+              "properties": {
+                "request": { "type": "string" },
+                "limit": { "type": "string" }
+              }
+            },
+            "memory": {
+              "type": "object",
+              "properties": {
+                "request": { "type": "string" },
+                "limit": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "endpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "port"],
+        "properties": {
+          "name": { "type": "string" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "protocol": { "type": "string", "enum": ["TCP", "UDP"], "default": "TCP" },
+          "public": { "type": "boolean", "default": false },
+          "domain": { "type": "string" },
+          "path": { "type": "string", "default": "/" },
+          "rateLimit": {
+            "type": "object",
+            "properties": {
+              "requestsPerSecond": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "properties": {
+        "readiness": { "$ref": "#/$defs/probe" },
+        "liveness": { "$ref": "#/$defs/probe" },
+        "startup": { "$ref": "#/$defs/probe" }
+      }
+    },
+    "security": {
+      "type": "object",
+      "properties": {
+        "runAsNonRoot": { "type": "boolean", "default": true },
+        "readOnlyRootFilesystem": { "type": "boolean", "default": true },
+        "allowPrivilegeEscalation": { "type": "boolean", "default": false },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "drop": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": ["ALL"]
+            },
+            "add": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "env": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" },
+          "fromSecret": { "type": "string" },
+          "fromConfigMap": { "type": "string" }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "properties": {
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "namespace": { "type": "string" },
+              "required": { "type": "boolean", "default": true }
+            }
+          }
+        },
+        "storage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "mountPath"],
+            "properties": {
+              "name": { "type": "string" },
+              "mountPath": { "type": "string" },
+              "size": { "type": "string", "default": "1Gi" },
+              "accessMode": { "type": "string", "enum": ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany"], "default": "ReadWriteOnce" },
+              "persistence": { "type": "string", "enum": ["ephemeral", "persistent"], "default": "ephemeral" }
+            }
+          }
+        }
+      }
+    },
+    "patches": {
+      "type": "object",
+      "properties": {
+        "kubernetes": { "type": "object" }
+      }
+    }
+  },
+  "$defs": {
+    "probe": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "port": { "type": "integer" },
+        "initialDelaySeconds": { "type": "integer", "default": 0 },
+        "periodSeconds": { "type": "integer", "default": 10 },
+        "timeoutSeconds": { "type": "integer", "default": 1 },
+        "failureThreshold": { "type": "integer", "default": 3 }
+      }
+    }
+  }
+}
