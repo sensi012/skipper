@@ -15,8 +15,12 @@ coverage.txt
 .DS_Store
 Thumbs.db
 
-# Local platform runtime databases
+# Local platform runtime databases & secrets
+.skipper/
 .app-platform/
+*.env
+!.env.example
+secrets.env
 
 # IDE & Editor folders
 .idea/

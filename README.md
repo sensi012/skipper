@@ -122,7 +122,7 @@ Copy-Item .\bin\skipper-windows-amd64.exe "$env:LOCALAPPDATA\Programs\skipper\sk
 
 ## 5. End-to-End Workflow Examples
 
-### 4.1 Declarative Application Specification (`skipper.yaml`)
+### 5.1 Declarative Application Specification (`skipper.yaml`)
 ```yaml
 version: "v1alpha1"
 name: "sample-service"
@@ -156,35 +156,95 @@ security:
   runAsNonRoot: true
 ```
 
-### 4.2 Auto-Detection & OCI Build (`app build`)
+### 5.2 Auto-Detection & OCI Build (`skipper build`)
 The build engine inspects the source repository to automatically recognize Go, Node.js, Python, Rust, or explicit Dockerfiles, synthesizing a minimal distroless multi-stage build:
 ```bash
-$ app build
+$ skipper build
 ==> Auto-detected stack: [go] (Files: go.mod)
 ==> Synthesizing optimal multi-stage container build for [go]...
 ==> Successfully built and tagged OCI image: sample-service:latest
 ```
 
-### 4.3 Zero-Lock-In Manifest Export (`app manifest`)
+### 5.3 Workstation Diagnostics (`skipper doctor`)
+Audits your workstation for container prerequisites and potential port conflicts:
+```bash
+$ skipper doctor
+==> Running Skipper environment health audit...
+  [✓] Docker Engine Daemon           : Running (Version: 26.1.1)
+  [✓] Kubernetes CLI (kubectl)       : Client binary available and configured.
+  [✓] Kind Local Cluster Tool        : kind v0.33.0
+  [✓] Port Availability (80)         : Port 80 is free.
+  [✓] Port Availability (443)        : Port 443 is free.
+  [✓] Port Availability (8080)       : Port 8080 is free.
+==> All critical prerequisites satisfied!
+```
+
+### 5.4 Instant Project Bootstrapping (`skipper init`)
+Auto-detects language stack and generates a tailored `skipper.yaml`:
+```bash
+$ skipper init --name payment-api --team checkout --port 8080
+==> Successfully generated 'skipper.yaml' for [payment-api] (Port: 8080, Team: checkout)!
+```
+
+### 5.5 Live Development with Hot-Reload (`skipper dev`)
+Watches project directory, debouncing file edits and hot-reloading code inside containers:
+```bash
+$ skipper dev
+==> [Skipper Dev] Watching . for code modifications...
+==> [Skipper Dev] Application 'payment-api' running at status [Running]
+==> [Change Detected: main.go] Synchronizing & rebuilding...
+```
+
+### 5.6 Secret Management (`skipper secret`)
+Store secrets locally and export directly to Kubernetes Secrets:
+```bash
+$ skipper secret set DB_PASSWORD=supersecret
+==> Secret 'DB_PASSWORD' saved successfully.
+
+$ skipper secret export
+apiVersion: v1
+kind: Secret
+metadata:
+  name: skipper-secrets
+  namespace: default
+type: Opaque
+data:
+  DB_PASSWORD: c3VwZXJzZWNyZXQ=
+```
+
+### 5.7 Port Forwarding Tunnel (`skipper port-forward`)
+```bash
+$ skipper port-forward sample-service 8080:8080
+==> Establishing port-forward to sample-service [Local :8080 -> Remote :8080] in namespace 'default'...
+Forwarding from 127.0.0.1:8080 -> 8080
+```
+
+### 5.8 Docker Compose Migration (`skipper import compose`)
+```bash
+$ skipper import compose docker-compose.yaml
+==> Successfully transpiled 'docker-compose.yaml' into 'skipper.yaml' (Service: web)!
+```
+
+### 5.9 Zero-Lock-In Manifest Export (`skipper manifest`)
 Generates production-hardened Kubernetes manifests with security standards (`seccompProfile: RuntimeDefault`, `readOnlyRootFilesystem: true`, `drop: [ALL]`), health probes, NetworkPolicies, and PodDisruptionBudgets:
 ```bash
-$ app manifest -o deploy.yaml
+$ skipper manifest -o deploy.yaml
 ==> Synthesized production manifests written to: deploy.yaml
 ```
 
-### 4.4 Local Cluster Zero-Friction Bootstrap (`app local`)
+### 5\.4 Local Cluster Zero-Friction Bootstrap (`skipper local`)
 ```bash
-$ app local init
-==> Bootstrapping local Kubernetes cluster 'app-dev' via Kind...
-==> Local cluster 'app-dev' initialized and ready for development!
+$ skipper local init
+==> Bootstrapping local Kubernetes cluster 'skipper-dev' via Kind...
+==> Local cluster 'skipper-dev' initialized and ready for development!
 
-$ app local status
-Local cluster 'app-dev': ACTIVE
+$ skipper local status
+Local cluster 'skipper-dev': ACTIVE
 ```
 
-### 4.5 Progressive Canary Delivery with Automated Health Gates (`app deploy`)
+### 5\.5 Progressive Canary Delivery with Automated Health Gates (`skipper deploy`)
 ```bash
-$ app deploy --strategy=canary --auto-rollback
+$ skipper deploy --strategy=canary --auto-rollback
 ==> Initiating Canary Rollout for 'sample-service' [Strategy: canary, Steps: [10 25 50 100]]
 --> Shifting traffic to Canary revision: 10% traffic...
     [Health Gate: PASSED] P99 Latency: <50ms, Error Rate: 0.00%
@@ -197,9 +257,9 @@ $ app deploy --strategy=canary --auto-rollback
 ==> Canary promotion complete! 100% traffic routed to new revision of 'sample-service'.
 ```
 
-### 4.6 Shift-Left Vulnerability Scanning (`app scan`)
+### 5\.6 Shift-Left Vulnerability Scanning (`skipper scan`)
 ```bash
-$ app scan sample-service:latest
+$ skipper scan sample-service:latest
 ==> Scanning image 'sample-service:latest' using Docker Scout...
 
 --- Security Audit Report ---
@@ -210,28 +270,28 @@ High:     0
 Status:   PASSED
 ```
 
-### 4.7 Operational Memory Retrospective Replay (`app time-travel`)
+### 5\.7 Operational Memory Retrospective Replay (`skipper time-travel`)
 Replays chronological mutations and telemetry leading up to any state transition:
 ```bash
-$ app time-travel --window 1h
+$ skipper time-travel --window 1h
 === OPERATIONAL MEMORY TIME-TRAVEL TIMELINE (Past 1h0m0s) ===
-[12:34:18] [MUTATION      ] (app build ) Built and tagged OCI image sample-service:latest
-[12:45:02] [MUTATION      ] (app deploy) Rollout canary for sample-service finished with state Promoted
+[12:34:18] [MUTATION      ] (skipper build ) Built and tagged OCI image sample-service:latest
+[12:45:02] [MUTATION      ] (skipper deploy) Rollout canary for sample-service finished with state Promoted
 ```
 
-### 4.8 Deterministic Diagnostics & Grounded Root Cause (`app diagnose`)
+### 5\.8 Deterministic Diagnostics & Grounded Root Cause (`skipper diagnose`)
 Executes the 8-detector deterministic matrix against live workload logs, telemetry, and operational memory:
 ```bash
-$ app diagnose sample-service
+$ skipper diagnose sample-service
 ==> Evaluating deterministic diagnostic matrix & operational context on 'sample-service'...
 [DIAGNOSIS COMPLETE: 0 ANOMALIES DETECTED] Workload appears healthy.
 ```
 *(When a fault is injected, such as an OOM crash or CrashLoop, the diagnostic report outputs exact cgroup metrics, root cause, confidence score, and suggested remediation commands).*
 
-### 4.9 FinOps Workload Rightsizing (`app rightsize`)
+### 5\.9 FinOps Workload Rightsizing (`skipper rightsize`)
 Calculates the delta between provisioned limits and actual P95 telemetry to reclaim wasted spend:
 ```bash
-$ app rightsize
+$ skipper rightsize
 === FINOPS WORKLOAD RIGHTSIZING ANALYSIS ===
 Workload:            sample-service (Namespace: default)
 Allocated CPU:       500m (Actual P95: 45m) -> Recommended: 200m
@@ -240,9 +300,9 @@ Est. Monthly Saving: $48.50 USD / replica
 Status:              OVERPROVISIONED (Rightsizing available)
 ```
 
-### 4.10 Policy-as-Code Compliance Verification (`app policy-check`)
+### 5\.10 Policy-as-Code Compliance Verification (`skipper policy-check`)
 ```bash
-$ app policy-check
+$ skipper policy-check
 [POLICY AUDIT PASSED] AppSpec complies with all enterprise platform rules.
 ```
 
@@ -269,7 +329,7 @@ $ app policy-check
   - Implemented `RuntimeEngine` interface ([`pkg/runtime/interface.go`](pkg/runtime/interface.go)).
   - Built `DockerAdapter` ([`pkg/runtime/docker.go`](pkg/runtime/docker.go)) and `KubernetesAdapter` ([`pkg/runtime/kubernetes.go`](pkg/runtime/kubernetes.go)).
 - [x] **Step 1.3: Local Development Engine Integration (Kind)**
-  - Implemented `KindManager` ([`pkg/local/cluster.go`](pkg/local/cluster.go)) for one-click ingress-ready cluster provisioning via `app local init`.
+  - Implemented `KindManager` ([`pkg/local/cluster.go`](pkg/local/cluster.go)) for one-click ingress-ready cluster provisioning via `skipper local init`.
 
 ### Phase 2: Autonomous Buildpacks & Production-Grade Manifest Generation
 - [x] **Step 2.1: Cloud Native Buildpacks (CNB) Detection & Build Pipeline**
@@ -277,9 +337,9 @@ $ app policy-check
 - [x] **Step 2.2: Intelligent Manifest Synthesizer**
   - Synthesizer ([`pkg/synthesizer/synthesizer.go`](pkg/synthesizer/synthesizer.go)) generating Deployments, Services, NetworkPolicies, and PodDisruptionBudgets with restricted security standards.
 - [x] **Step 2.3: Principled Escape Hatch System**
-  - Added `app manifest -o <file>` to export vanilla Kubernetes manifests with zero vendor lock-in.
+  - Added `skipper manifest -o <file>` to export vanilla Kubernetes manifests with zero vendor lock-in.
 - [x] **Step 2.4: Shift-Left Security & Vulnerability Scanning**
-  - Scanner integration ([`pkg/security/scanner.go`](pkg/security/scanner.go)) with Docker Scout and Trivy via `app scan`.
+  - Scanner integration ([`pkg/security/scanner.go`](pkg/security/scanner.go)) with Docker Scout and Trivy via `skipper scan`.
 - [x] **Step 2.5: Progressive Delivery Engine Integration**
   - Canary rollout controller ([`pkg/rollout/controller.go`](pkg/rollout/controller.go)) with latency/error evaluation gates and automated rollback triggers.
 
@@ -289,9 +349,9 @@ $ app policy-check
 - [x] **Step 3.2: High-Resolution Telemetry & Causal Event Ingestion**
   - Modeled `CausalEvent` linking mutations, metric anomalies, and system signals chronologically.
 - [x] **Step 3.3: First-Class Ephemeral Debugging with Context Retention**
-  - Enhanced `app debug` to capture session timestamps, commands executed, and exit codes into durable `DebugSessionRecord` archives.
+  - Enhanced `skipper debug` to capture session timestamps, commands executed, and exit codes into durable `DebugSessionRecord` archives.
 - [x] **Step 3.4: "Time-Travel" Diagnostic & Replay CLI View**
-  - Added `app time-travel --window <duration>` to reconstruct cluster change lineage leading to incidents.
+  - Added `skipper time-travel --window <duration>` to reconstruct cluster change lineage leading to incidents.
 
 ### Phase 4: Deterministic Diagnostics & Context-Grounded AI Engine
 - [x] **Step 4.1: Deterministic Diagnostic Matrix (Rule Engine)**
@@ -299,7 +359,7 @@ $ app policy-check
 - [x] **Step 4.2: Context-Grounded Operational Memory Diagnostics (RAG)**
   - Correlated deterministic signals with historical change events to explain *why* issues occurred.
 - [x] **Step 4.3: Guided Remediation Engine & CLI Diagnostic Tooling**
-  - Exposed via `app diagnose [name]`, providing confidence scores and actionable remediation commands.
+  - Exposed via `skipper diagnose [name]`, providing confidence scores and actionable remediation commands.
 - [x] **Step 4.4: Incident Memory & Continuous Knowledge Loop**
   - Automatically archives resolved incident signatures into operational memory.
 
@@ -307,9 +367,9 @@ $ app policy-check
 - [x] **Step 5.1: Multi-Tenant Workspace & Namespace Isolation**
   - Enforced team namespace segregation and synthesized zero-trust NetworkPolicies.
 - [x] **Step 5.2: Automated Workload Rightsizing & FinOps Cost Optimizer**
-  - Built FinOps telemetry analyzer ([`pkg/governance/engine.go`](pkg/governance/engine.go)) exposed via `app rightsize`.
+  - Built FinOps telemetry analyzer ([`pkg/governance/engine.go`](pkg/governance/engine.go)) exposed via `skipper rightsize`.
 - [x] **Step 5.3: Policy-as-Code Engine Integration**
-  - Built admission gatekeeper (`app policy-check`) verifying ownership tags, non-root execution, and resource bounds.
+  - Built admission gatekeeper (`skipper policy-check`) verifying ownership tags, non-root execution, and resource bounds.
 - [x] **Step 5.4: Central Platform Operator & Management Controls**
   - Single-binary CLI provides unified platform management across fleets.
 
