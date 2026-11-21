@@ -62,11 +62,17 @@ $ skipper dev
 
 ### `skipper build`
 Auto-detects Go, Node.js, Python, Rust, Java, or custom Dockerfiles and builds standard OCI images without manual Dockerfile authoring. Records build mutations into operational memory.
+
+**Flags:**
+- `-t`, `--tag <image:tag>` — Override target OCI image tag (e.g. `my-app:v1.0.0`, defaults to `spec.Image` or `<name>:latest`)
+
 ```bash
 $ skipper build
 ==> Auto-detected stack: [go] (Files: go.mod)
 ==> Synthesizing optimal multi-stage container build for [go]...
 ==> Successfully built and tagged OCI image: payment-api:latest
+
+$ skipper build -t ghcr.io/my-org/payment-api:v1.2.3
 ```
 
 ### `skipper up` / `skipper down`

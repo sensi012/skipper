@@ -267,8 +267,11 @@ func TestBuild_DockerfileFallbackPath(t *testing.T) {
 
 		var out bytes.Buffer
 		tag, err := builder.Build(context.Background(), &config.AppSpec{
-			Name:  "web",
-			Build: config.BuildConfig{Context: dir},
+			Name: "web",
+			Build: config.BuildConfig{
+				Context: dir,
+				Args:    map[string]string{"VERSION": "1.2.3", "ENV": "prod"},
+			},
 		}, &out)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -276,8 +279,12 @@ func TestBuild_DockerfileFallbackPath(t *testing.T) {
 		if tag != "web:latest" {
 			t.Fatalf("expected web:latest, got %s", tag)
 		}
-		if len(buildCmd) < 6 || buildCmd[0] != "docker" || buildCmd[1] != "build" || buildCmd[5] != filepath.Join(dir, "Dockerfile") {
+		if len(buildCmd) < 10 || buildCmd[0] != "docker" || buildCmd[1] != "build" || buildCmd[5] != filepath.Join(dir, "Dockerfile") {
 			t.Fatalf("unexpected docker build command: %v", buildCmd)
+		}
+		joined := strings.Join(buildCmd, " ")
+		if !strings.Contains(joined, "--build-arg ENV=prod --build-arg VERSION=1.2.3") {
+			t.Fatalf("expected sorted --build-arg flags in docker build command, got: %s", joined)
 		}
 	})
 

@@ -109,6 +109,90 @@ func TestBuildDockerRunArgs(t *testing.T) {
 	}
 }
 
+func TestNormalizeDockerUnits(t *testing.T) {
+	memCases := map[string]string{
+		"512Mi":   "512m",
+		"1Gi":     "1g",
+		"256Ki":   "256k",
+		"2Ti":     "2048g",
+		"500M":    "500m",
+		"2G":      "2g",
+		"1024K":   "1024k",
+		"512m":    "512m",
+		"1048576": "1048576",
+		"":        "",
+	}
+	for in, want := range memCases {
+		if got := normalizeDockerMemory(in); got != want {
+			t.Errorf("normalizeDockerMemory(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	cpuCases := map[string]string{
+		"500m":  "0.5",
+		"1500m": "1.5",
+		"1000m": "1",
+		"2":     "2",
+		"0.25":  "0.25",
+		"":      "",
+		"bad":   "",
+	}
+	for in, want := range cpuCases {
+		if got := normalizeDockerCPU(in); got != want {
+			t.Errorf("normalizeDockerCPU(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestBuildDockerRunArgsK8sUnitsAndSecurity(t *testing.T) {
+	spec := &config.AppSpec{
+		Name:  "dns-proxy",
+		Image: "dns-proxy:v1",
+		Endpoints: []config.EndpointConfig{
+			{Name: "dns", Port: 53, Protocol: "UDP"},
+			{Name: "http", Port: 8080, Protocol: "TCP"},
+		},
+		Security: config.SecurityConfig{
+			RunAsNonRoot:           true,
+			ReadOnlyRootFilesystem: true,
+		},
+		Runtime: config.RuntimeConfig{
+			Resources: config.ResourceConfig{
+				Memory: config.ResourceLimit{Limit: "512Mi"},
+				CPU:    config.ResourceLimit{Limit: "500m"},
+			},
+		},
+	}
+
+	got := buildDockerRunArgs(spec)
+	want := []string{
+		"run", "-d", "--name", "dns-proxy",
+		"-p", "53:53/udp",
+		"-p", "8080:8080",
+		"--security-opt=no-new-privileges:true",
+		"--read-only",
+		"-m", "512m",
+		"--cpus", "0.5",
+		"dns-proxy:v1",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildDockerRunArgs K8s normalization mismatch:\ngot:  %v\nwant: %v", got, want)
+	}
+}
+
+func TestDockerDeployMissingLocalImageHint(t *testing.T) {
+	adapter := NewDockerAdapter()
+	adapter.execCommand = makeFakeExec([]fakeStep{
+		{exitCode: 0}, // docker rm -f
+		{exitCode: 125, stderr: "Unable to find image 'demo-app:latest' locally"}, // docker run
+	}, nil)
+
+	_, err := adapter.Deploy(context.Background(), &config.AppSpec{Name: "demo-app"})
+	if err == nil || !strings.Contains(err.Error(), "skipper build") {
+		t.Fatalf("expected helpful 'skipper build' hint on missing local image, got: %v", err)
+	}
+}
+
 func TestDockerAdapterLifecycle(t *testing.T) {
 	t.Run("Initialize success and failure", func(t *testing.T) {
 		d := &DockerAdapter{

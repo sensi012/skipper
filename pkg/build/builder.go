@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/sensi012/skipper/pkg/config"
@@ -207,7 +208,10 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 			dockerfile = spec.Build.Dockerfile
 		}
 		_, _ = fmt.Fprintf(out, "==> Building OCI image via Docker BuildKit with %s...\n", dockerfile)
-		if err := b.execCmd(ctx, nil, out, out, "docker", "build", "-t", targetTag, "-f", filepath.Join(sourceDir, dockerfile), sourceDir); err != nil {
+		buildArgs := []string{"build", "-t", targetTag, "-f", filepath.Join(sourceDir, dockerfile)}
+		buildArgs = appendBuildArgFlags(buildArgs, spec.Build.Args)
+		buildArgs = append(buildArgs, sourceDir)
+		if err := b.execCmd(ctx, nil, out, out, "docker", buildArgs...); err != nil {
 			return "", fmt.Errorf("docker build failed: %w", err)
 		}
 		return targetTag, nil
@@ -220,17 +224,35 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 		return "", err
 	}
 
-	if err := b.execCmd(ctx, strings.NewReader(synthDockerfile), out, out, "docker", "build", "-t", targetTag, "-f", "-", sourceDir); err != nil {
+	buildArgs := []string{"build", "-t", targetTag, "-f", "-"}
+	buildArgs = appendBuildArgFlags(buildArgs, spec.Build.Args)
+	buildArgs = append(buildArgs, sourceDir)
+	if err := b.execCmd(ctx, strings.NewReader(synthDockerfile), out, out, "docker", buildArgs...); err != nil {
 		return "", fmt.Errorf("synthesized container build failed: %w", err)
 	}
 
 	return targetTag, nil
 }
 
+func appendBuildArgFlags(args []string, buildArgs map[string]string) []string {
+	if len(buildArgs) == 0 {
+		return args
+	}
+	keys := make([]string, 0, len(buildArgs))
+	for k := range buildArgs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", k, buildArgs[k]))
+	}
+	return args
+}
+
 func (b *CNBBuilder) synthesizeDockerfile(det *DetectionResult) (string, error) {
 	switch det.Runtime {
 	case RuntimeGo:
-		return `FROM golang:1.22-alpine AS builder
+		return `FROM golang:1.25-alpine AS builder
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download || true

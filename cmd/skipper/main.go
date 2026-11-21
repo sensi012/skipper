@@ -126,7 +126,8 @@ func loadSpec() (*config.AppSpec, error) {
 }
 
 func newBuildCmd() *cobra.Command {
-	return &cobra.Command{
+	var imageTag string
+	cmd := &cobra.Command{
 		Use:   "build",
 		Short: "Auto-detect stack and build OCI-compliant container image",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -134,10 +135,13 @@ func newBuildCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if strings.TrimSpace(imageTag) != "" {
+				spec.Image = strings.TrimSpace(imageTag)
+			}
 			builder := build.NewCNBBuilder()
 			ctx := context.Background()
 
-			tag, err := builder.Build(ctx, spec, os.Stdout)
+			tag, err := builder.Build(ctx, spec, cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -153,10 +157,12 @@ func newBuildCmd() *cobra.Command {
 				})
 			}
 
-			fmt.Printf("==> Successfully built and tagged OCI image: %s\n", tag)
+			fmt.Fprintf(cmd.OutOrStdout(), "==> Successfully built and tagged OCI image: %s\n", tag)
 			return nil
 		},
 	}
+	cmd.Flags().StringVarP(&imageTag, "tag", "t", "", "Override target OCI image tag (e.g. my-app:v1.0.0)")
+	return cmd
 }
 
 func newDeployCmd() *cobra.Command {

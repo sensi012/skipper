@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,11 +44,65 @@ func (d *DockerAdapter) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// normalizeDockerMemory converts Kubernetes memory quantities (e.g. 512Mi, 1Gi, 256Ki, 2Ti)
+// into Docker CLI-compatible memory strings (e.g. 512m, 1g, 256k, 2048g).
+func normalizeDockerMemory(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	switch {
+	case strings.HasSuffix(s, "Ki"):
+		return strings.TrimSuffix(s, "Ki") + "k"
+	case strings.HasSuffix(s, "Mi"):
+		return strings.TrimSuffix(s, "Mi") + "m"
+	case strings.HasSuffix(s, "Gi"):
+		return strings.TrimSuffix(s, "Gi") + "g"
+	case strings.HasSuffix(s, "Ti"):
+		if n, err := strconv.ParseFloat(strings.TrimSuffix(s, "Ti"), 64); err == nil {
+			return strconv.FormatFloat(n*1024, 'f', -1, 64) + "g"
+		}
+		return strings.TrimSuffix(s, "Ti") + "g"
+	case strings.HasSuffix(s, "K"):
+		return strings.TrimSuffix(s, "K") + "k"
+	case strings.HasSuffix(s, "M"):
+		return strings.TrimSuffix(s, "M") + "m"
+	case strings.HasSuffix(s, "G"):
+		return strings.TrimSuffix(s, "G") + "g"
+	default:
+		return s
+	}
+}
+
+// normalizeDockerCPU converts Kubernetes CPU quantities (e.g. 500m, 1500m, 2)
+// into Docker --cpus decimal values (e.g. 0.5, 1.5, 2).
+func normalizeDockerCPU(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.HasSuffix(s, "m") {
+		milliStr := strings.TrimSuffix(s, "m")
+		if milli, err := strconv.ParseFloat(milliStr, 64); err == nil && milli > 0 {
+			return strconv.FormatFloat(milli/1000.0, 'f', -1, 64)
+		}
+		return ""
+	}
+	if cores, err := strconv.ParseFloat(s, 64); err == nil && cores > 0 {
+		return strconv.FormatFloat(cores, 'f', -1, 64)
+	}
+	return ""
+}
+
 func buildDockerRunArgs(spec *config.AppSpec) []string {
 	args := []string{"run", "-d", "--name", spec.Name}
 
 	for _, ep := range spec.Endpoints {
-		args = append(args, "-p", fmt.Sprintf("%d:%d", ep.Port, ep.Port))
+		mapping := fmt.Sprintf("%d:%d", ep.Port, ep.Port)
+		if strings.EqualFold(ep.Protocol, "UDP") {
+			mapping += "/udp"
+		}
+		args = append(args, "-p", mapping)
 	}
 
 	for _, env := range spec.Env {
@@ -60,10 +115,18 @@ func buildDockerRunArgs(spec *config.AppSpec) []string {
 	if spec.Security.RunAsNonRoot {
 		args = append(args, "--security-opt=no-new-privileges:true")
 	}
+	if spec.Security.ReadOnlyRootFilesystem {
+		args = append(args, "--read-only")
+	}
 
-	// Memory limits if set
-	if spec.Runtime.Resources.Memory.Limit != "" {
-		args = append(args, "-m", spec.Runtime.Resources.Memory.Limit)
+	// Memory limits if set (normalize Kubernetes Mi/Gi/Ki units for Docker CLI)
+	if mem := normalizeDockerMemory(spec.Runtime.Resources.Memory.Limit); mem != "" {
+		args = append(args, "-m", mem)
+	}
+
+	// CPU limits if set (normalize Kubernetes millicores e.g. 500m -> 0.5)
+	if cpus := normalizeDockerCPU(spec.Runtime.Resources.CPU.Limit); cpus != "" {
+		args = append(args, "--cpus", cpus)
 	}
 
 	targetImage := spec.Image
@@ -88,7 +151,11 @@ func (d *DockerAdapter) Deploy(ctx context.Context, spec *config.AppSpec) (*Work
 	cmd := d.command(ctx, "docker", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("docker run failed: %w: %s", err, string(out))
+		outStr := string(out)
+		if spec.Image == "" && (strings.Contains(outStr, "Unable to find image") || strings.Contains(outStr, "No such image")) {
+			return nil, fmt.Errorf("image '%s:latest' not found locally; run 'skipper build' first or set 'image:' in skipper.yaml (%w: %s)", spec.Name, err, strings.TrimSpace(outStr))
+		}
+		return nil, fmt.Errorf("docker run failed: %w: %s", err, outStr)
 	}
 
 	return d.Status(ctx, spec.Name)
