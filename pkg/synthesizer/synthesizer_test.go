@@ -80,3 +80,49 @@ func TestManifestBundleFullYaml(t *testing.T) {
 		t.Errorf("unexpected FullYaml format: %s", full)
 	}
 }
+
+func TestSynthesizeEdgeCasesAndValidation(t *testing.T) {
+	synth := NewSynthesizer()
+
+	if _, err := synth.Synthesize(nil, "default"); err == nil {
+		t.Error("expected error for nil spec")
+	}
+	if _, err := synth.Synthesize(&config.AppSpec{}, "default"); err == nil {
+		t.Error("expected error for empty spec name")
+	}
+	if _, err := synth.Synthesize(&config.AppSpec{Name: "-bad"}, "default"); err == nil {
+		t.Error("expected error for leading dash spec name")
+	}
+	if _, err := synth.Synthesize(&config.AppSpec{Name: "app"}, "bad\nns"); err == nil {
+		t.Error("expected error for newline in namespace")
+	}
+
+	// Nil receiver and zero-value Synthesizer fallback defaults
+	var nilSynth *Synthesizer
+	spec := &config.AppSpec{
+		Name:  "custom-svc",
+		Image: "ghcr.io/acme/custom:v1",
+		Env: []config.EnvVar{
+			{Name: "LOG_LEVEL", Value: "info"},
+		},
+		Runtime: config.RuntimeConfig{
+			Resources: config.ResourceConfig{
+				CPU:    config.ResourceLimit{Request: "250m", Limit: "1000m"},
+				Memory: config.ResourceLimit{Request: "256Mi", Limit: "1Gi"},
+			},
+		},
+	}
+	bundle, err := nilSynth.Synthesize(spec, "")
+	if err != nil {
+		t.Fatalf("unexpected error on nil synthesizer receiver: %v", err)
+	}
+	if !strings.Contains(bundle.Deployment, `name: LOG_LEVEL`) || !strings.Contains(bundle.Deployment, "cpu: 250m") {
+		t.Errorf("expected custom env and CPU request in deployment:\n%s", bundle.Deployment)
+	}
+
+	zeroSynth := &Synthesizer{}
+	b2, err := zeroSynth.Synthesize(&config.AppSpec{Name: "zero-app"}, "default")
+	if err != nil || !strings.Contains(b2.Deployment, "cpu: 100m") {
+		t.Errorf("expected fallback default CPU 100m on zero-value Synthesizer, err=%v", err)
+	}
+}

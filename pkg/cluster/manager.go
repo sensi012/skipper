@@ -6,7 +6,31 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"unicode"
 )
+
+func validateClusterArg(label, val string) error {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return fmt.Errorf("%s is required", label)
+	}
+	if strings.HasPrefix(trimmed, "-") {
+		return fmt.Errorf("invalid %s %q: must not start with '-'", label, val)
+	}
+	for _, r := range trimmed {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("invalid %s %q: must not contain whitespace or control characters", label, val)
+		}
+	}
+	return nil
+}
+
+func validateOptionalClusterArg(label, val string) error {
+	if strings.TrimSpace(val) == "" {
+		return nil
+	}
+	return validateClusterArg(label, val)
+}
 
 // ClusterContext represents a configured Kubernetes kubeconfig context.
 type ClusterContext struct {
@@ -109,6 +133,9 @@ func (m *ContextManager) UseContext(ctx context.Context, name string) error {
 	if name == "" {
 		return fmt.Errorf("context name is required")
 	}
+	if err := validateClusterArg("context name", name); err != nil {
+		return err
+	}
 	cmd := m.command(ctx, "kubectl", "config", "use-context", name)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -134,6 +161,10 @@ func (m *ContextManager) FleetStatus(ctx context.Context) (*FleetSummary, error)
 	for _, cc := range contexts {
 		if cc.Current {
 			summary.CurrentContext = cc.Name
+		}
+		if validateClusterArg("context name", cc.Name) != nil {
+			summary.Contexts = append(summary.Contexts, cc)
+			continue
 		}
 		probe := m.command(ctx, "kubectl", "--context", cc.Name, "cluster-info", "--request-timeout=3s")
 		out, err := probe.CombinedOutput()

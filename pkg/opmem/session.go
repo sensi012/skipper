@@ -14,9 +14,14 @@ func (l *OperationalMemoryLedger) RecordDebugSessionWithEvent(sess *DebugSession
 		return fmt.Errorf("debug session record cannot be nil")
 	}
 
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	now := time.Now().UTC()
 	if strings.TrimSpace(sess.SessionID) == "" {
 		sess.SessionID = fmt.Sprintf("dbg-%d", now.UnixNano())
+	} else if err := validateSessionID(sess.SessionID); err != nil {
+		return err
 	}
 	if sess.StartedAt.IsZero() {
 		sess.StartedAt = now
@@ -28,7 +33,7 @@ func (l *OperationalMemoryLedger) RecordDebugSessionWithEvent(sess *DebugSession
 		sess.Operator = "skipper-cli"
 	}
 
-	if err := l.RecordDebugSession(sess); err != nil {
+	if err := l.recordDebugSessionLocked(sess); err != nil {
 		return err
 	}
 
@@ -43,7 +48,7 @@ func (l *OperationalMemoryLedger) RecordDebugSessionWithEvent(sess *DebugSession
 		desc = "[dry-run] " + desc
 	}
 
-	return l.RecordTelemetryEvent(&CausalEvent{
+	return l.recordTelemetryEventLocked(&CausalEvent{
 		Timestamp:   sess.StartedAt,
 		Type:        "DEBUG_SESSION",
 		Source:      "ephemeral-sandbox",
@@ -54,8 +59,8 @@ func (l *OperationalMemoryLedger) RecordDebugSessionWithEvent(sess *DebugSession
 
 // GetDebugSession retrieves a previously recorded debug session by its SessionID.
 func (l *OperationalMemoryLedger) GetDebugSession(sessionID string) (*DebugSessionRecord, error) {
-	if strings.TrimSpace(sessionID) == "" {
-		return nil, fmt.Errorf("session ID is required")
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, err
 	}
 	sessions, err := l.ListDebugSessions("")
 	if err != nil {

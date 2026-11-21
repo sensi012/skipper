@@ -25,6 +25,12 @@ func DockerNetworkName(appName string) string {
 // Known presets (postgres, redis, mysql, mongo) provide sensible local defaults, while dep.Image, dep.Port,
 // and dep.Env override or extend those defaults. Custom dependencies require dep.Image to be set.
 func ResolveDependencyPreset(appName string, dep config.ServiceDependency) (image string, port int, env map[string]string, err error) {
+	if err := validateSafeArg("dependency name", dep.Name); err != nil {
+		return "", 0, nil, err
+	}
+	if err := validateOptionalSafeArg("dependency image", dep.Image); err != nil {
+		return "", 0, nil, err
+	}
 	env = make(map[string]string)
 	dbName := strings.TrimSpace(appName)
 	if dbName == "" {

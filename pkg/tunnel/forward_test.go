@@ -167,4 +167,43 @@ func TestPortForwarderForward(t *testing.T) {
 			t.Errorf("expected stderr output, got: %s", errBuf.String())
 		}
 	})
+
+	t.Run("flag injection, invalid ports, and context cancellation", func(t *testing.T) {
+		pf := NewPortForwarder()
+		for _, bad := range []string{"--kubeconfig=/etc/passwd", "-n", "bad name", "bad\nname"} {
+			if err := pf.Forward(context.Background(), PortForwardOptions{
+				WorkloadName: bad,
+				LocalPort:    8080,
+				RemotePort:   80,
+			}, nil, nil); err == nil {
+				t.Errorf("Forward should reject unsafe workload name %q", bad)
+			}
+			if err := pf.Forward(context.Background(), PortForwardOptions{
+				Namespace:    bad,
+				WorkloadName: "api",
+				LocalPort:    8080,
+				RemotePort:   80,
+			}, nil, nil); err == nil {
+				t.Errorf("Forward should reject unsafe namespace %q", bad)
+			}
+		}
+		if err := pf.Forward(context.Background(), PortForwardOptions{
+			WorkloadName: "api",
+			LocalPort:    0,
+			RemotePort:   80,
+		}, nil, nil); err == nil {
+			t.Errorf("Forward should reject out-of-range port 0")
+		}
+
+		// Pre-cancelled context terminates promptly without hanging
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := pf.Forward(ctx, PortForwardOptions{
+			WorkloadName: "api",
+			LocalPort:    8080,
+			RemotePort:   80,
+		}, nil, nil); err == nil {
+			t.Errorf("expected error when context is already cancelled")
+		}
+	})
 }

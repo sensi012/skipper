@@ -75,6 +75,9 @@ func (t *Transpiler) TranspileCompose(yamlBytes []byte, targetService string) (*
 	if !ok {
 		return nil, fmt.Errorf("service '%s' not found in compose file", targetService)
 	}
+	if strings.TrimSpace(svcName) == "" || strings.HasPrefix(strings.TrimSpace(svcName), "-") || strings.ContainsAny(svcName, " \t\r\n/\\") {
+		return nil, fmt.Errorf("invalid compose service name %q", svcName)
+	}
 
 	hasBuild, ctx, dockerfile, target, args := parseBuildConfig(svc.Build, os.LookupEnv, false)
 	var buildCfg config.BuildConfig

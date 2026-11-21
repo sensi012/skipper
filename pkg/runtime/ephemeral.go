@@ -74,6 +74,24 @@ func (l *EphemeralSandboxLauncher) BuildCommand(ctx context.Context, opts Epheme
 	if debugImage == "" {
 		debugImage = DefaultDebugImage
 	}
+	if err := validateSafeArg("debug image", debugImage); err != nil {
+		return "", nil, "", err
+	}
+	if err := validateOptionalSafeArg("workload name", opts.WorkloadName); err != nil {
+		return "", nil, "", err
+	}
+	if err := validateOptionalSafeArg("namespace", opts.Namespace); err != nil {
+		return "", nil, "", err
+	}
+	if err := validateOptionalSafeArg("target pod", opts.TargetPod); err != nil {
+		return "", nil, "", err
+	}
+	if err := validateOptionalSafeArg("target container", opts.TargetContainer); err != nil {
+		return "", nil, "", err
+	}
+	if err := validateOptionalSafeArg("copy pod name", opts.CopyPodName); err != nil {
+		return "", nil, "", err
+	}
 
 	cmdArgs := opts.Command
 	if len(cmdArgs) == 0 {

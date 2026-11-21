@@ -31,12 +31,26 @@ func NewProjectInitializer() *ProjectInitializer {
 }
 
 func (p *ProjectInitializer) InspectAndGenerate(ctx context.Context, opts InitOptions) (*config.AppSpec, error) {
-	dir := opts.SourceDir
-	if dir == "" {
-		dir = "."
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if opts.Port < 0 || opts.Port > 65535 {
+		return nil, fmt.Errorf("invalid port %d: must be between 0 and 65535", opts.Port)
 	}
 
-	det, err := p.builder.Detect(ctx, dir)
+	dir := strings.TrimSpace(opts.SourceDir)
+	if dir == "" {
+		dir = "."
+	} else if strings.ContainsAny(dir, "\r\n\x00") {
+		return nil, fmt.Errorf("invalid source directory: must not contain control characters")
+	}
+
+	b := p.builder
+	if b == nil {
+		b = build.NewCNBBuilder()
+	}
+
+	det, err := b.Detect(ctx, dir)
 	if err != nil {
 		return nil, fmt.Errorf("detection failed: %w", err)
 	}
@@ -114,6 +128,14 @@ func (p *ProjectInitializer) InspectAndGenerate(ctx context.Context, opts InitOp
 }
 
 func (p *ProjectInitializer) WriteSpecFile(spec *config.AppSpec, targetPath string) error {
+	if spec == nil {
+		return fmt.Errorf("app spec must not be nil")
+	}
+	targetPath = strings.TrimSpace(targetPath)
+	if targetPath == "" || strings.ContainsAny(targetPath, "\r\n\x00") {
+		return fmt.Errorf("invalid target path %q", targetPath)
+	}
+
 	data, err := yaml.Marshal(spec)
 	if err != nil {
 		return fmt.Errorf("failed to encode YAML: %w", err)
@@ -142,12 +164,17 @@ func sanitizeWorkloadName(s string) string {
 	s = strings.ReplaceAll(s, "_", "-")
 	s = strings.ReplaceAll(s, " ", "-")
 	var valid []rune
+	prevHyphen := false
 	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
 			valid = append(valid, r)
+			prevHyphen = false
+		} else if r == '-' && !prevHyphen {
+			valid = append(valid, r)
+			prevHyphen = true
 		}
 	}
-	out := string(valid)
+	out := strings.Trim(string(valid), "-")
 	if len(out) == 0 {
 		return "my-service"
 	}

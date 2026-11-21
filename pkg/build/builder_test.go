@@ -151,6 +151,48 @@ func TestBuild_ValidationErrors(t *testing.T) {
 	if _, err := builder.Build(context.Background(), spec, nil); err == nil {
 		t.Fatal("expected error when both Image and Name are empty")
 	}
+
+	_ = os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM scratch"), 0644)
+
+	// Flag injection in Image
+	if _, err := builder.Build(context.Background(), &config.AppSpec{
+		Name:  "app",
+		Image: "--privileged",
+		Build: config.BuildConfig{Context: dir},
+	}, nil); err == nil {
+		t.Fatal("expected error for flag-injection Image starting with '-'")
+	}
+
+	// Path traversal in Dockerfile
+	if _, err := builder.Build(context.Background(), &config.AppSpec{
+		Name: "app",
+		Build: config.BuildConfig{
+			Context:    dir,
+			Dockerfile: "../../etc/passwd",
+		},
+	}, nil); err == nil {
+		t.Fatal("expected error for path-traversal Dockerfile outside build context")
+	}
+
+	// Flag injection in Build.Target and Build.Args
+	if _, err := builder.Build(context.Background(), &config.AppSpec{
+		Name: "app",
+		Build: config.BuildConfig{
+			Context: dir,
+			Target:  "--network=host",
+		},
+	}, nil); err == nil {
+		t.Fatal("expected error for flag-injection Build.Target")
+	}
+	if _, err := builder.Build(context.Background(), &config.AppSpec{
+		Name: "app",
+		Build: config.BuildConfig{
+			Context: dir,
+			Args:    map[string]string{"--bad": "1"},
+		},
+	}, nil); err == nil {
+		t.Fatal("expected error for flag-injection Build.Args key")
+	}
 }
 
 func TestBuild_PackCNBPath(t *testing.T) {

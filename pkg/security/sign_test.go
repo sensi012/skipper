@@ -106,6 +106,18 @@ func TestImageSigner_Sign(t *testing.T) {
 		if _, err := signer.Sign(context.Background(), SignOptions{Image: "   "}); err == nil {
 			t.Fatal("expected error for empty image")
 		}
+		if _, err := signer.Sign(context.Background(), SignOptions{Image: "--key=evil.key"}); err == nil {
+			t.Fatal("expected error for flag-injection image starting with '-'")
+		}
+		if _, err := signer.Sign(context.Background(), SignOptions{Image: "app:v1", KeyRef: "--force"}); err == nil {
+			t.Fatal("expected error for flag-injection KeyRef starting with '-'")
+		}
+		if _, err := signer.Sign(context.Background(), SignOptions{Image: "app:v1", Annotations: map[string]string{"bad=key": "v"}}); err == nil {
+			t.Fatal("expected error for annotation key containing '='")
+		}
+		if _, err := signer.Sign(context.Background(), SignOptions{Image: "app:v1", Annotations: map[string]string{"k": "v\n--flag"}}); err == nil {
+			t.Fatal("expected error for annotation value containing newline")
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		if _, err := signer.Sign(ctx, SignOptions{Image: "app:v1"}); !errors.Is(err, context.Canceled) {
@@ -202,6 +214,15 @@ func TestImageSigner_Verify(t *testing.T) {
 		signer := NewImageSigner()
 		if _, err := signer.Verify(context.Background(), VerifyOptions{}); err == nil {
 			t.Fatal("expected error for empty image")
+		}
+		if _, err := signer.Verify(context.Background(), VerifyOptions{Image: "--insecure-ignore-tlog"}); err == nil {
+			t.Fatal("expected error for flag-injection image")
+		}
+		if _, err := signer.Verify(context.Background(), VerifyOptions{Image: "app:v1", CertificateIdentity: "--bad"}); err == nil {
+			t.Fatal("expected error for flag-injection CertificateIdentity")
+		}
+		if _, err := signer.Verify(context.Background(), VerifyOptions{Image: "app:v1", CertificateIssuer: "--bad"}); err == nil {
+			t.Fatal("expected error for flag-injection CertificateIssuer")
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()

@@ -95,12 +95,23 @@ type promVectorSample struct {
 
 // QueryScalar executes an instant PromQL query against /api/v1/query and extracts a single float64 value.
 func (g *PrometheusHealthGate) QueryScalar(ctx context.Context, promQL string) (float64, error) {
+	if g == nil {
+		return 0, fmt.Errorf("prometheus health gate must not be nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(g.Endpoint) == "" {
 		return 0, fmt.Errorf("prometheus endpoint must not be empty")
 	}
 	client := g.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && client.Timeout == 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
 	}
 
 	reqURL := fmt.Sprintf("%s/api/v1/query?query=%s", strings.TrimRight(g.Endpoint, "/"), url.QueryEscape(promQL))
@@ -118,7 +129,7 @@ func (g *PrometheusHealthGate) QueryScalar(ctx context.Context, promQL string) (
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
 	if err != nil {
 		return 0, fmt.Errorf("failed to read prometheus response: %w", err)
 	}

@@ -50,20 +50,42 @@ func NewRollbackManager(ledger *opmem.OperationalMemoryLedger) *RollbackManager 
 	}
 }
 
+func validateRollbackToken(field, val string, disallowSlashes bool) error {
+	if strings.HasPrefix(val, "-") {
+		return fmt.Errorf("invalid %s %q: must not start with '-'", field, val)
+	}
+	if strings.ContainsAny(val, " \t\r\n\x00") {
+		return fmt.Errorf("invalid %s %q: must not contain whitespace or control characters", field, val)
+	}
+	if disallowSlashes && (strings.ContainsAny(val, "/\\") || strings.Contains(val, "..")) {
+		return fmt.Errorf("invalid %s %q: must not contain path separators", field, val)
+	}
+	return nil
+}
+
 // BuildCommand constructs the kubectl rollout undo command and arguments for the given options.
 func (m *RollbackManager) BuildCommand(opts RollbackOptions) (string, []string, error) {
 	workload := strings.TrimSpace(opts.WorkloadName)
 	if workload == "" {
 		return "", nil, fmt.Errorf("workload name is required for rollback")
 	}
+	if err := validateRollbackToken("workload name", workload, true); err != nil {
+		return "", nil, err
+	}
 
 	ns := strings.TrimSpace(opts.Namespace)
 	if ns == "" {
 		ns = "default"
 	}
+	if err := validateRollbackToken("namespace", ns, true); err != nil {
+		return "", nil, err
+	}
 
 	var args []string
 	if ctxName := strings.TrimSpace(opts.ContextName); ctxName != "" {
+		if err := validateRollbackToken("context name", ctxName, false); err != nil {
+			return "", nil, err
+		}
 		args = append(args, "--context", ctxName)
 	}
 
@@ -71,6 +93,9 @@ func (m *RollbackManager) BuildCommand(opts RollbackOptions) (string, []string, 
 
 	rev := strings.TrimSpace(opts.Revision)
 	if rev != "" && !strings.EqualFold(rev, "previous") {
+		if err := validateRollbackToken("revision", rev, true); err != nil {
+			return "", nil, err
+		}
 		args = append(args, fmt.Sprintf("--to-revision=%s", rev))
 	}
 

@@ -15,8 +15,12 @@ import (
 	"time"
 
 	"github.com/sensi012/skipper/pkg/build"
+	"github.com/sensi012/skipper/pkg/config"
+	"github.com/sensi012/skipper/pkg/diagnostics"
 	"github.com/sensi012/skipper/pkg/doctor"
 	"github.com/sensi012/skipper/pkg/governance"
+	"github.com/sensi012/skipper/pkg/opmem"
+	"github.com/sensi012/skipper/pkg/runtime"
 )
 
 func resetGlobals(t *testing.T) {
@@ -224,6 +228,14 @@ func TestShortFlagShadowingFixes(t *testing.T) {
 	}
 	if !strings.Contains(out, "-n, --namespace") {
 		t.Errorf("expected port-forward --help to inherit global -n, --namespace flag")
+	}
+
+	out, _, err = executeCLI(t, "logs", "--help")
+	if err != nil {
+		t.Fatalf("logs --help failed (must not panic on -f shorthand collision): %v", err)
+	}
+	if !strings.Contains(out, "--follow") {
+		t.Errorf("expected logs --help to show --follow flag")
 	}
 }
 
@@ -1461,6 +1473,396 @@ func TestBuildCmdMultiServiceModes(t *testing.T) {
 		_, _, err = executeCLI(t, "build", "--service", "web")
 		if err == nil || !strings.Contains(err.Error(), "--service requires compose or discover mode") {
 			t.Fatalf("expected --service requires compose or discover mode error, got: %v", err)
+		}
+	})
+}
+
+type stubRuntimeEngine struct {
+	name      string
+	initErr   error
+	deployErr error
+	statusErr error
+	stopErr   error
+	logsErr   error
+	debugCode int
+	debugErr  error
+	logText   string
+}
+
+func (s *stubRuntimeEngine) Name() string {
+	if s.name == "" {
+		return "stub-docker"
+	}
+	return s.name
+}
+
+func (s *stubRuntimeEngine) Initialize(ctx context.Context) error {
+	return s.initErr
+}
+
+func (s *stubRuntimeEngine) Deploy(ctx context.Context, spec *config.AppSpec) (*runtime.WorkloadStatus, error) {
+	if s.deployErr != nil {
+		return nil, s.deployErr
+	}
+	return &runtime.WorkloadStatus{
+		Name:      spec.Name,
+		Target:    s.Name(),
+		State:     "Running",
+		Replicas:  1,
+		Available: 1,
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+func (s *stubRuntimeEngine) Status(ctx context.Context, workloadName string) (*runtime.WorkloadStatus, error) {
+	if s.statusErr != nil {
+		return nil, s.statusErr
+	}
+	return &runtime.WorkloadStatus{
+		Name:      workloadName,
+		Target:    s.Name(),
+		State:     "Running",
+		Replicas:  2,
+		Available: 2,
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+func (s *stubRuntimeEngine) Stop(ctx context.Context, workloadName string) error {
+	return s.stopErr
+}
+
+func (s *stubRuntimeEngine) Logs(ctx context.Context, workloadName string, opts runtime.LogOptions, out io.Writer) error {
+	if s.logsErr != nil {
+		return s.logsErr
+	}
+	_, _ = io.WriteString(out, s.logText)
+	return nil
+}
+
+func (s *stubRuntimeEngine) Debug(ctx context.Context, opts runtime.DebugOptions, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	_, _ = io.WriteString(stdout, "debug-attached\n")
+	return s.debugCode, s.debugErr
+}
+
+func withStubRuntime(t *testing.T, eng runtime.RuntimeEngine) {
+	t.Helper()
+	orig := runtimeAdapterFactory
+	runtimeAdapterFactory = func() runtime.RuntimeEngine { return eng }
+	t.Cleanup(func() { runtimeAdapterFactory = orig })
+}
+
+func TestRuntimeLifecycleCmds(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+
+	stub := &stubRuntimeEngine{name: "docker", logText: "line1\nline2\n"}
+	withStubRuntime(t, stub)
+
+	t.Run("missing workload errors for status, logs, down, debug", func(t *testing.T) {
+		for _, sub := range []string{"status", "logs", "down", "debug"} {
+			resetGlobals(t)
+			chdirTemp(t)
+			_, _, err := executeCLI(t, sub)
+			if err == nil || !strings.Contains(err.Error(), "workload name required") {
+				t.Fatalf("expected workload name required for %q, got: %v", sub, err)
+			}
+		}
+	})
+
+	t.Run("up, status, logs, down, debug text and strict JSON", func(t *testing.T) {
+		resetGlobals(t)
+		dir := chdirTemp(t)
+		if err := os.WriteFile(filepath.Join(dir, "skipper.yaml"), []byte(sampleCompliantSpec), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// up text + json
+		out, _, err := executeCLI(t, "up", "-i", "demo-service:v2")
+		if err != nil || !strings.Contains(out, "deployed successfully") {
+			t.Fatalf("up text failed: err=%v out=%s", err, out)
+		}
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "up", "--format", "json")
+		if err != nil {
+			t.Fatalf("up --format json failed: %v", err)
+		}
+		var upStatus runtime.WorkloadStatus
+		if err := json.Unmarshal([]byte(out), &upStatus); err != nil || upStatus.Name != "demo-service" {
+			t.Fatalf("up --format json invalid JSON: err=%v out=%s", err, out)
+		}
+
+		// status text + json
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "status")
+		if err != nil || !strings.Contains(out, "Workload: demo-service") {
+			t.Fatalf("status text failed: err=%v out=%s", err, out)
+		}
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "status", "demo-service", "--format", "json")
+		if err != nil {
+			t.Fatalf("status --format json failed: %v", err)
+		}
+		var st runtime.WorkloadStatus
+		if err := json.Unmarshal([]byte(out), &st); err != nil || st.Replicas != 2 {
+			t.Fatalf("status --format json invalid JSON: err=%v out=%s", err, out)
+		}
+
+		// logs
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "logs", "--tail", "10")
+		if err != nil || !strings.Contains(out, "line1") {
+			t.Fatalf("logs failed: err=%v out=%s", err, out)
+		}
+
+		// down text + json
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "down")
+		if err != nil || !strings.Contains(out, "stopped on target") {
+			t.Fatalf("down text failed: err=%v out=%s", err, out)
+		}
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "down", "demo-service", "--format", "json")
+		if err != nil {
+			t.Fatalf("down --format json failed: %v", err)
+		}
+		var downRes map[string]string
+		if err := json.Unmarshal([]byte(out), &downRes); err != nil || downRes["status"] != "STOPPED" {
+			t.Fatalf("down --format json invalid JSON: err=%v out=%s", err, out)
+		}
+
+		// debug (non-ephemeral)
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "debug", "demo-service")
+		if err != nil || !strings.Contains(out, "Debug session preserved") {
+			t.Fatalf("debug failed: err=%v out=%s", err, out)
+		}
+	})
+
+	t.Run("deploy policy block and compliant JSON", func(t *testing.T) {
+		resetGlobals(t)
+		dir := chdirTemp(t)
+		if err := os.WriteFile(filepath.Join(dir, "skipper.yaml"), []byte(sampleNonCompliantSpec), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := executeCLI(t, "deploy")
+		if err == nil || !strings.Contains(err.Error(), "halted by platform governance policy") {
+			t.Fatalf("expected governance block on deploy, got: %v", err)
+		}
+	})
+}
+
+func TestScanInitDiagnoseTimeTravelCmds(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+
+	t.Run("init text, json, and already-exists error", func(t *testing.T) {
+		resetGlobals(t)
+		dir := chdirTemp(t)
+		_ = os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/initdemo\n\ngo 1.25\n"), 0644)
+
+		out, _, err := executeCLI(t, "init", "--name", "init-svc", "--team", "core", "--port", "9000", "--format", "json")
+		if err != nil {
+			t.Fatalf("init --format json failed: %v", err)
+		}
+		var initPayload map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &initPayload); err != nil {
+			t.Fatalf("init --format json invalid JSON: %v\n%s", err, out)
+		}
+
+		// Second run fails because skipper.yaml already exists
+		resetGlobals(t)
+		_, _, err = executeCLI(t, "init")
+		if err == nil || !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("expected already exists error on duplicate init, got: %v", err)
+		}
+	})
+
+	t.Run("scan missing image error and text/json output", func(t *testing.T) {
+		resetGlobals(t)
+		chdirTemp(t)
+		_, _, err := executeCLI(t, "scan")
+		if err == nil || !strings.Contains(err.Error(), "image name required") {
+			t.Fatalf("expected image name required error, got: %v", err)
+		}
+
+		resetGlobals(t)
+		out, _, err := executeCLI(t, "scan", "nginx:1.25", "--format", "json")
+		if err != nil {
+			t.Fatalf("scan --format json failed: %v", err)
+		}
+		var scanRes map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &scanRes); err != nil {
+			t.Fatalf("scan --format json invalid JSON: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("diagnose missing workload and strict JSON hygiene", func(t *testing.T) {
+		resetGlobals(t)
+		chdirTemp(t)
+		_, _, err := executeCLI(t, "diagnose")
+		if err == nil || !strings.Contains(err.Error(), "workload name required") {
+			t.Fatalf("expected workload name required error, got: %v", err)
+		}
+
+		resetGlobals(t)
+		out, _, err := executeCLI(t, "diagnose", "demo-app", "--format", "json")
+		if err != nil {
+			t.Fatalf("diagnose --format json failed: %v", err)
+		}
+		var findings []diagnostics.DiagnosticFinding
+		if err := json.Unmarshal([]byte(out), &findings); err != nil {
+			t.Fatalf("diagnose --format json corrupted stdout (must be pure JSON array): %v\noutput:\n%s", err, out)
+		}
+	})
+
+	t.Run("time-travel text and json with recorded events", func(t *testing.T) {
+		resetGlobals(t)
+		chdirTemp(t)
+
+		// Seed an event in opmem
+		if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
+			_ = ledger.RecordTelemetryEvent(&opmem.CausalEvent{
+				Timestamp:   time.Now(),
+				Type:        "MUTATION",
+				Source:      "test",
+				Description: "Deployed demo-app",
+				Severity:    "INFO",
+			})
+		}
+
+		out, _, err := executeCLI(t, "time-travel", "demo-app", "--window", "1h")
+		if err != nil || !strings.Contains(out, "Deployed demo-app") {
+			t.Fatalf("time-travel text failed: err=%v out=%s", err, out)
+		}
+
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "time-travel", "demo-app", "--window", "invalid-duration", "--format", "json")
+		if err != nil {
+			t.Fatalf("time-travel --format json failed: %v", err)
+		}
+		var events []opmem.CausalEvent
+		if err := json.Unmarshal([]byte(out), &events); err != nil || len(events) == 0 {
+			t.Fatalf("time-travel --format json invalid JSON: err=%v out=%s", err, out)
+		}
+	})
+}
+
+func TestJSONHygieneAndEnvContracts(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+
+	t.Run("manifest, import compose, build --save, and secret JSON hygiene", func(t *testing.T) {
+		resetGlobals(t)
+		dir := chdirTemp(t)
+		if err := os.WriteFile(filepath.Join(dir, "skipper.yaml"), []byte(sampleCompliantSpec), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// manifest --format json
+		out, _, err := executeCLI(t, "manifest", "--format", "json")
+		if err != nil {
+			t.Fatalf("manifest --format json failed: %v", err)
+		}
+		var mf map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &mf); err != nil {
+			t.Fatalf("manifest --format json invalid JSON: %v\n%s", err, out)
+		}
+
+		// single-service build --save --format json
+		_ = os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM alpine\n"), 0644)
+		withFakeBuilder(t, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+			if name == "pack" {
+				return errors.New("no pack")
+			}
+			_, _ = io.WriteString(stdout, "docker build progress line\n")
+			return nil
+		})
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "build", "-t", "demo-service:v9.9.9", "--save", "--format", "json")
+		if err != nil {
+			t.Fatalf("build --save --format json failed: %v", err)
+		}
+		var buildJSON map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &buildJSON); err != nil || buildJSON["image"] != "demo-service:v9.9.9" {
+			t.Fatalf("build --save --format json corrupted stdout: err=%v\nout=%s", err, out)
+		}
+
+		// secret set/get/export --format json and empty key rejection
+		resetGlobals(t)
+		_, _, err = executeCLI(t, "secret", "set", "=emptykey")
+		if err == nil {
+			t.Fatal("expected error for empty secret key '=emptykey'")
+		}
+		out, _, err = executeCLI(t, "secret", "set", "TOKEN_K=val123", "--format", "json")
+		if err != nil || json.Unmarshal([]byte(out), &map[string]interface{}{}) != nil {
+			t.Fatalf("secret set --format json failed: err=%v out=%s", err, out)
+		}
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "secret", "get", "TOKEN_K", "--format", "json")
+		if err != nil || json.Unmarshal([]byte(out), &map[string]interface{}{}) != nil {
+			t.Fatalf("secret get --format json failed: err=%v out=%s", err, out)
+		}
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "secret", "export", "--format", "json")
+		if err != nil || json.Unmarshal([]byte(out), &map[string]interface{}{}) != nil {
+			t.Fatalf("secret export --format json failed: err=%v out=%s", err, out)
+		}
+
+		// import compose --format json
+		composePath := filepath.Join(dir, "docker-compose.yaml")
+		_ = os.WriteFile(composePath, []byte("services:\n  api:\n    image: nginx:alpine\n    ports:\n      - \"8080:80\"\n"), 0644)
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "import", "compose", composePath, "--format", "json")
+		if err != nil || json.Unmarshal([]byte(out), &map[string]interface{}{}) != nil {
+			t.Fatalf("import compose --format json failed: err=%v out=%s", err, out)
+		}
+	})
+
+	t.Run("VAULT_ADDR and VAULT_TOKEN environment variable fallback in secret sync", func(t *testing.T) {
+		var gotToken string
+		vaultSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotToken = r.Header.Get("X-Vault-Token")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"data":{"ENV_SECRET":"from-vault"}}}`))
+		}))
+		defer vaultSrv.Close()
+
+		t.Setenv("VAULT_ADDR", vaultSrv.URL)
+		t.Setenv("VAULT_TOKEN", "env-fallback-token")
+
+		resetGlobals(t)
+		out, _, err := executeCLI(t, "secret", "sync", "--direction", "pull", "--vault-path", "apps/demo", "--format", "json")
+		if err != nil {
+			t.Fatalf("secret sync pull with VAULT_ADDR/VAULT_TOKEN env fallback failed: %v", err)
+		}
+		if gotToken != "env-fallback-token" {
+			t.Errorf("expected X-Vault-Token=env-fallback-token from env, got %q", gotToken)
+		}
+		if json.Unmarshal([]byte(out), &map[string]interface{}{}) != nil {
+			t.Fatalf("invalid JSON from secret sync pull: %s", out)
+		}
+	})
+
+	t.Run("invalid flags, unknown subcommands, and port-forward arg contracts", func(t *testing.T) {
+		resetGlobals(t)
+		if _, _, err := executeCLI(t, "--nonexistent-flag"); err == nil {
+			t.Fatal("expected error for unknown root flag")
+		}
+		resetGlobals(t)
+		if _, _, err := executeCLI(t, "nonexistent-command"); err == nil {
+			t.Fatal("expected error for unknown subcommand")
+		}
+		resetGlobals(t)
+		if _, _, err := executeCLI(t, "port-forward", "only-one-arg"); err == nil {
+			t.Fatal("expected error for port-forward with 1 arg")
+		}
+		resetGlobals(t)
+		if _, _, err := executeCLI(t, "port-forward", "svc", "invalid-port"); err == nil {
+			t.Fatal("expected error for port-forward with invalid port format")
 		}
 	})
 }

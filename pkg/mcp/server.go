@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -23,6 +26,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	// MaxToolOutputBytes caps individual MCP tool response payloads to prevent context bloat.
+	MaxToolOutputBytes = 256 * 1024
+	// maxInputLogBytes caps diagnostic log inputs scanned by regex detectors.
+	maxInputLogBytes = 256 * 1024
+)
+
+var mcpLedgerMu sync.Mutex
+
 type MCPServer struct {
 	srv *server.MCPServer
 }
@@ -34,7 +46,7 @@ func NewMCPServer() *MCPServer {
 	doctorTool := mcp.NewTool("skipper_doctor",
 		mcp.WithDescription("Audits developer environment prerequisites: Docker daemon status, kubectl availability, Kind CLI, and port conflicts"),
 	)
-	s.AddTool(doctorTool, handleDoctor)
+	s.AddTool(doctorTool, wrapToolHandler("skipper_doctor", handleDoctor))
 
 	// 2. Tool: skipper_init
 	initTool := mcp.NewTool("skipper_init",
@@ -42,14 +54,14 @@ func NewMCPServer() *MCPServer {
 		mcp.WithString("name", mcp.Description("Optional workload name")),
 		mcp.WithNumber("port", mcp.Description("Optional primary container port")),
 	)
-	s.AddTool(initTool, handleInit)
+	s.AddTool(initTool, wrapToolHandler("skipper_init", handleInit))
 
 	// 3. Tool: skipper_policy_check
 	policyTool := mcp.NewTool("skipper_policy_check",
 		mcp.WithDescription("Validates skipper.yaml against organizational compliance and security policies"),
 		mcp.WithString("configPath", mcp.Description("Path to skipper.yaml (defaults to skipper.yaml)")),
 	)
-	s.AddTool(policyTool, handlePolicyCheck)
+	s.AddTool(policyTool, wrapToolHandler("skipper_policy_check", handlePolicyCheck))
 
 	// 4. Tool: skipper_manifest
 	manifestTool := mcp.NewTool("skipper_manifest",
@@ -57,7 +69,7 @@ func NewMCPServer() *MCPServer {
 		mcp.WithString("configPath", mcp.Description("Path to skipper.yaml")),
 		mcp.WithString("namespace", mcp.Description("Target Kubernetes namespace (default: default)")),
 	)
-	s.AddTool(manifestTool, handleManifest)
+	s.AddTool(manifestTool, wrapToolHandler("skipper_manifest", handleManifest))
 
 	// 5. Tool: skipper_diagnose
 	diagnoseTool := mcp.NewTool("skipper_diagnose",
@@ -65,7 +77,7 @@ func NewMCPServer() *MCPServer {
 		mcp.WithString("workload", mcp.Required(), mcp.Description("Workload name to diagnose")),
 		mcp.WithString("logs", mcp.Required(), mcp.Description("Recent container logs or events")),
 	)
-	s.AddTool(diagnoseTool, handleDiagnose)
+	s.AddTool(diagnoseTool, wrapToolHandler("skipper_diagnose", handleDiagnose))
 
 	// 6. Tool: skipper_rightsize
 	rightsizeTool := mcp.NewTool("skipper_rightsize",
@@ -75,7 +87,7 @@ func NewMCPServer() *MCPServer {
 		mcp.WithString("prometheusUrl", mcp.Description("Optional Prometheus HTTP endpoint for live P95 metrics")),
 		mcp.WithBoolean("useKubectlTop", mcp.Description("Query live pod metrics via kubectl top")),
 	)
-	s.AddTool(rightsizeTool, handleRightsize)
+	s.AddTool(rightsizeTool, wrapToolHandler("skipper_rightsize", handleRightsize))
 
 	// 7. Tool: skipper_rollback
 	rollbackTool := mcp.NewTool("skipper_rollback",
@@ -87,7 +99,7 @@ func NewMCPServer() *MCPServer {
 		mcp.WithString("context", mcp.Description("Optional kubeconfig context name")),
 		mcp.WithBoolean("dryRun", mcp.Description("Preview kubectl rollout undo command without executing (default: true for safety)")),
 	)
-	s.AddTool(rollbackTool, handleRollback)
+	s.AddTool(rollbackTool, wrapToolHandler("skipper_rollback", handleRollback))
 
 	// 8. Tool: skipper_investigate_incident
 	investigateTool := mcp.NewTool("skipper_investigate_incident",
@@ -97,7 +109,7 @@ func NewMCPServer() *MCPServer {
 		mcp.WithString("namespace", mcp.Description("Target Kubernetes namespace (default: default)")),
 		mcp.WithNumber("windowMinutes", mcp.Description("Lookback window in minutes for operational memory timeline (default: 60)")),
 	)
-	s.AddTool(investigateTool, handleInvestigateIncident)
+	s.AddTool(investigateTool, wrapToolHandler("skipper_investigate_incident", handleInvestigateIncident))
 
 	// 9. Tool: skipper_sbom
 	sbomTool := mcp.NewTool("skipper_sbom",
@@ -106,7 +118,7 @@ func NewMCPServer() *MCPServer {
 		mcp.WithString("format", mcp.Description("SBOM format: cyclonedx or spdx (default: cyclonedx)")),
 		mcp.WithString("outputPath", mcp.Description("Optional file path to write the generated SBOM JSON")),
 	)
-	s.AddTool(sbomTool, handleSBOM)
+	s.AddTool(sbomTool, wrapToolHandler("skipper_sbom", handleSBOM))
 
 	// 10. Tool: skipper_drift_check
 	driftTool := mcp.NewTool("skipper_drift_check",
@@ -117,16 +129,83 @@ func NewMCPServer() *MCPServer {
 		mcp.WithString("namespace", mcp.Description("Target Kubernetes namespace (default: default)")),
 		mcp.WithString("context", mcp.Description("Optional kubeconfig context name")),
 	)
-	s.AddTool(driftTool, handleDriftCheck)
+	s.AddTool(driftTool, wrapToolHandler("skipper_drift_check", handleDriftCheck))
 
 	return &MCPServer{srv: s}
 }
 
+func wrapToolHandler(toolName string, fn server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (res *mcp.CallToolResult, err error) {
+		if ctx != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("%s aborted: %v", toolName, ctxErr)), nil
+			}
+		} else {
+			ctx = context.Background()
+		}
+
+		defer func() {
+			if r := recover(); r != nil {
+				res = mcp.NewToolResultError(fmt.Sprintf("internal error in %s: %v", toolName, r))
+				err = nil
+			}
+		}()
+
+		res, err = fn(ctx, request)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("%s error: %v", toolName, err)), nil
+		}
+		if res == nil {
+			return mcp.NewToolResultError(fmt.Sprintf("%s returned empty result", toolName)), nil
+		}
+		return boundToolResult(res), nil
+	}
+}
+
+func boundToolResult(res *mcp.CallToolResult) *mcp.CallToolResult {
+	if res == nil {
+		return nil
+	}
+	for i, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok && len(tc.Text) > MaxToolOutputBytes {
+			suffix := fmt.Sprintf("\n... [truncated: output exceeded %d bytes limit]", MaxToolOutputBytes)
+			tc.Text = tc.Text[:MaxToolOutputBytes-len(suffix)] + suffix
+			res.Content[i] = tc
+		}
+	}
+	return res
+}
+
+func boundInputLogs(logs string) string {
+	if len(logs) <= maxInputLogBytes {
+		return logs
+	}
+	return logs[len(logs)-maxInputLogBytes:]
+}
+
+// Start runs the MCP JSON-RPC 2.0 server over standard I/O, honoring ctx cancellation
+// and routing any transport error logs strictly to os.Stderr.
 func (m *MCPServer) Start(ctx context.Context) error {
-	return server.ServeStdio(m.srv)
+	return m.ServeIO(ctx, os.Stdin, os.Stdout, os.Stderr)
+}
+
+// ServeIO runs the MCP JSON-RPC 2.0 loop over custom reader/writer streams.
+func (m *MCPServer) ServeIO(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	stdioSrv := server.NewStdioServer(m.srv)
+	stdioSrv.SetErrorLogger(log.New(stderr, "", 0))
+	return stdioSrv.Listen(ctx, stdin, stdout)
 }
 
 func handleDoctor(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("doctor cancelled: %v", err)), nil
+	}
 	doc := doctor.NewDoctorEngine()
 	report := doc.RunDiagnostics(ctx)
 	data, _ := yaml.Marshal(report)
@@ -134,8 +213,17 @@ func handleDoctor(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallTo
 }
 
 func handleInit(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name := request.GetString("name", "")
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("init cancelled: %v", err)), nil
+	}
+	name := strings.TrimSpace(request.GetString("name", ""))
+	if strings.HasPrefix(name, "-") || strings.ContainsAny(name, "/\\ \t\r\n") {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid workload name %q", name)), nil
+	}
 	port := request.GetInt("port", 0)
+	if port < 0 || port > 65535 {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid port %d: must be between 0 and 65535", port)), nil
+	}
 
 	initr := bootstrapper.NewProjectInitializer()
 	spec, err := initr.InspectAndGenerate(ctx, bootstrapper.InitOptions{
@@ -151,7 +239,13 @@ func handleInit(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallTool
 }
 
 func handlePolicyCheck(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	cfgPath := request.GetString("configPath", "skipper.yaml")
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("policy check cancelled: %v", err)), nil
+	}
+	cfgPath := strings.TrimSpace(request.GetString("configPath", "skipper.yaml"))
+	if cfgPath == "" {
+		cfgPath = "skipper.yaml"
+	}
 
 	spec, err := readSpec(cfgPath)
 	if err != nil {
@@ -169,8 +263,17 @@ func handlePolicyCheck(ctx context.Context, request mcp.CallToolRequest) (*mcp.C
 }
 
 func handleManifest(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	cfgPath := request.GetString("configPath", "skipper.yaml")
-	ns := request.GetString("namespace", "default")
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("manifest synthesis cancelled: %v", err)), nil
+	}
+	cfgPath := strings.TrimSpace(request.GetString("configPath", "skipper.yaml"))
+	if cfgPath == "" {
+		cfgPath = "skipper.yaml"
+	}
+	ns := strings.TrimSpace(request.GetString("namespace", "default"))
+	if ns == "" {
+		ns = "default"
+	}
 
 	spec, err := readSpec(cfgPath)
 	if err != nil {
@@ -187,8 +290,11 @@ func handleManifest(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 }
 
 func handleDiagnose(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("diagnose cancelled: %v", err)), nil
+	}
 	workload, err := request.RequireString("workload")
-	if err != nil {
+	if err != nil || strings.TrimSpace(workload) == "" {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid workload parameter: %v", err)), nil
 	}
 	logs, err := request.RequireString("logs")
@@ -197,7 +303,7 @@ func handleDiagnose(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 	}
 
 	matrix := diagnostics.NewDeterministicMatrix(nil)
-	findings, err := matrix.Diagnose(ctx, "default", workload, logs)
+	findings, err := matrix.Diagnose(ctx, "default", strings.TrimSpace(workload), boundInputLogs(logs))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -207,8 +313,17 @@ func handleDiagnose(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 }
 
 func handleRightsize(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	cfgPath := request.GetString("configPath", "skipper.yaml")
-	ns := request.GetString("namespace", "default")
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("rightsize cancelled: %v", err)), nil
+	}
+	cfgPath := strings.TrimSpace(request.GetString("configPath", "skipper.yaml"))
+	if cfgPath == "" {
+		cfgPath = "skipper.yaml"
+	}
+	ns := strings.TrimSpace(request.GetString("namespace", "default"))
+	if ns == "" {
+		ns = "default"
+	}
 	promURL := strings.TrimSpace(request.GetString("prometheusUrl", ""))
 	useTop := request.GetBool("useKubectlTop", false)
 
@@ -248,6 +363,9 @@ type IncidentReport struct {
 }
 
 func handleRollback(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("rollback cancelled: %v", err)), nil
+	}
 	workload, err := request.RequireString("workload")
 	if err != nil || strings.TrimSpace(workload) == "" {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid workload parameter: %v", err)), nil
@@ -267,6 +385,7 @@ func handleRollback(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 	ctxName := strings.TrimSpace(request.GetString("context", ""))
 	dryRun := request.GetBool("dryRun", true)
 
+	mcpLedgerMu.Lock()
 	ledger, _ := opmem.NewOperationalMemoryLedger("")
 	mgr := rollout.NewRollbackManager(ledger)
 	res, err := mgr.Execute(ctx, rollout.RollbackOptions{
@@ -277,6 +396,7 @@ func handleRollback(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 		ContextName:  ctxName,
 		DryRun:       dryRun,
 	})
+	mcpLedgerMu.Unlock()
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -300,6 +420,9 @@ func severityRank(s diagnostics.IncidentSeverity) int {
 }
 
 func handleInvestigateIncident(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("incident investigation cancelled: %v", err)), nil
+	}
 	workload, err := request.RequireString("workload")
 	if err != nil || strings.TrimSpace(workload) == "" {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid workload parameter: %v", err)), nil
@@ -317,25 +440,27 @@ func handleInvestigateIncident(ctx context.Context, request mcp.CallToolRequest)
 		windowMin = 60
 	}
 
+	mcpLedgerMu.Lock()
 	ledger, _ := opmem.NewOperationalMemoryLedger("")
 	matrix := diagnostics.NewDeterministicMatrix(ledger)
-	findings, err := matrix.Diagnose(ctx, ns, workload, logs)
+	findings, err := matrix.Diagnose(ctx, ns, strings.TrimSpace(workload), boundInputLogs(logs))
+	var timeline []opmem.CausalEvent
+	var sessions []opmem.DebugSessionRecord
+	if err == nil && ledger != nil {
+		if evts, qErr := ledger.QueryTimeline(workload, time.Duration(windowMin)*time.Minute); qErr == nil {
+			timeline = evts
+		}
+		if sess, sErr := ledger.ListDebugSessions(workload); sErr == nil {
+			sessions = sess
+		}
+	}
+	mcpLedgerMu.Unlock()
+
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if findings == nil {
 		findings = []diagnostics.DiagnosticFinding{}
-	}
-
-	var timeline []opmem.CausalEvent
-	var sessions []opmem.DebugSessionRecord
-	if ledger != nil {
-		if evts, err := ledger.QueryTimeline(workload, time.Duration(windowMin)*time.Minute); err == nil {
-			timeline = evts
-		}
-		if sess, err := ledger.ListDebugSessions(workload); err == nil {
-			sessions = sess
-		}
 	}
 	if timeline == nil {
 		timeline = []opmem.CausalEvent{}
@@ -397,6 +522,9 @@ type SBOMToolResult struct {
 }
 
 func handleSBOM(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("SBOM generation cancelled: %v", err)), nil
+	}
 	target := strings.TrimSpace(request.GetString("target", "."))
 	if target == "" {
 		target = "."
@@ -434,6 +562,9 @@ func handleSBOM(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallTool
 }
 
 func handleDriftCheck(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("drift check cancelled: %v", err)), nil
+	}
 	desiredYAML := request.GetString("desiredYaml", "")
 	liveYAML := request.GetString("liveYaml", "")
 	detector := cluster.NewDriftDetector()
@@ -447,9 +578,15 @@ func handleDriftCheck(ctx context.Context, request mcp.CallToolRequest) (*mcp.Ca
 			return mcp.NewToolResultError(fmt.Sprintf("drift check failed: %v", err)), nil
 		}
 	} else {
-		cfgPath := request.GetString("configPath", "skipper.yaml")
-		ns := request.GetString("namespace", "default")
-		ctxName := request.GetString("context", "")
+		cfgPath := strings.TrimSpace(request.GetString("configPath", "skipper.yaml"))
+		if cfgPath == "" {
+			cfgPath = "skipper.yaml"
+		}
+		ns := strings.TrimSpace(request.GetString("namespace", "default"))
+		if ns == "" {
+			ns = "default"
+		}
+		ctxName := strings.TrimSpace(request.GetString("context", ""))
 
 		spec, err := readSpec(cfgPath)
 		if err != nil {
@@ -476,6 +613,9 @@ func readSpec(path string) (*config.AppSpec, error) {
 	var spec config.AppSpec
 	if err := yaml.Unmarshal(data, &spec); err != nil {
 		return nil, fmt.Errorf("invalid YAML format in %s: %w", path, err)
+	}
+	if strings.TrimSpace(spec.Name) == "" {
+		return nil, fmt.Errorf("invalid spec in %s: workload name must not be empty", path)
 	}
 	return &spec, nil
 }

@@ -625,3 +625,69 @@ func TestKubernetesAdapterLiveClientCheck(t *testing.T) {
 		t.Fatalf("live kubectl version --client failed: %v", err)
 	}
 }
+
+func TestRuntimeFlagInjectionAndInputValidation(t *testing.T) {
+	ctx := context.Background()
+	d := NewDockerAdapter()
+	k := NewKubernetesAdapter("default")
+
+	malicious := []string{"--privileged", "-e", "bad name", "bad\nname"}
+	for _, bad := range malicious {
+		if _, err := d.Deploy(ctx, &config.AppSpec{Name: bad}); err == nil {
+			t.Errorf("DockerAdapter.Deploy should reject workload name %q", bad)
+		}
+		if _, err := d.Deploy(ctx, &config.AppSpec{Name: "app", Image: bad}); err == nil {
+			t.Errorf("DockerAdapter.Deploy should reject image %q", bad)
+		}
+		if _, err := d.Status(ctx, bad); err == nil {
+			t.Errorf("DockerAdapter.Status should reject %q", bad)
+		}
+		if err := d.Stop(ctx, bad); err == nil {
+			t.Errorf("DockerAdapter.Stop should reject %q", bad)
+		}
+		if err := d.Logs(ctx, bad, LogOptions{}, &bytes.Buffer{}); err == nil {
+			t.Errorf("DockerAdapter.Logs should reject %q", bad)
+		}
+		if _, err := d.Debug(ctx, DebugOptions{WorkloadName: bad}, nil, nil, nil); err == nil {
+			t.Errorf("DockerAdapter.Debug should reject %q", bad)
+		}
+		if _, _, _, err := ResolveDependencyPreset("app", config.ServiceDependency{Name: bad, Type: "redis"}); err == nil {
+			t.Errorf("ResolveDependencyPreset should reject dep name %q", bad)
+		}
+		if _, _, _, err := ResolveDependencyPreset("app", config.ServiceDependency{Name: "cache", Type: "redis", Image: bad}); err == nil {
+			t.Errorf("ResolveDependencyPreset should reject dep image %q", bad)
+		}
+
+		if _, err := k.GenerateStandardManifests(&config.AppSpec{Name: bad}); err == nil {
+			t.Errorf("GenerateStandardManifests should reject workload name %q", bad)
+		}
+		if _, err := k.GenerateStandardManifests(&config.AppSpec{Name: "app", Image: bad}); err == nil {
+			t.Errorf("GenerateStandardManifests should reject image %q", bad)
+		}
+		if _, err := k.Status(ctx, bad); err == nil {
+			t.Errorf("KubernetesAdapter.Status should reject %q", bad)
+		}
+		if err := k.Stop(ctx, bad); err == nil {
+			t.Errorf("KubernetesAdapter.Stop should reject %q", bad)
+		}
+		if err := k.Logs(ctx, bad, LogOptions{}, &bytes.Buffer{}); err == nil {
+			t.Errorf("KubernetesAdapter.Logs should reject workload %q", bad)
+		}
+		if err := k.Logs(ctx, "app", LogOptions{Container: bad}, &bytes.Buffer{}); err == nil {
+			t.Errorf("KubernetesAdapter.Logs should reject container %q", bad)
+		}
+		if _, err := k.Debug(ctx, DebugOptions{TargetPod: bad}, nil, nil, nil); err == nil {
+			t.Errorf("KubernetesAdapter.Debug should reject targetPod %q", bad)
+		}
+		if _, err := k.Debug(ctx, DebugOptions{TargetPod: "pod-1", TargetContainer: bad}, nil, nil, nil); err == nil {
+			t.Errorf("KubernetesAdapter.Debug should reject targetContainer %q", bad)
+		}
+		if _, err := k.Debug(ctx, DebugOptions{TargetPod: "pod-1", DebugImage: bad}, nil, nil, nil); err == nil {
+			t.Errorf("KubernetesAdapter.Debug should reject debugImage %q", bad)
+		}
+		badNS := NewKubernetesAdapter(bad)
+		if _, err := badNS.Deploy(ctx, &config.AppSpec{Name: "app"}); err == nil {
+			t.Errorf("KubernetesAdapter.Deploy should reject namespace %q", bad)
+		}
+	}
+}

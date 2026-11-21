@@ -355,5 +355,22 @@ spec:
 		if _, err := dd.DetectClusterDrift(context.Background(), spec, "", ""); err == nil || !strings.Contains(err.Error(), "failed to fetch live") {
 			t.Fatalf("expected fetch error, got %v", err)
 		}
+
+		// Flag injection rejection
+		cm := NewContextManager()
+		for _, bad := range []string{"--kubeconfig=/etc/passwd", "-v", "ctx with space", "ctx\nnewline"} {
+			if err := cm.UseContext(context.Background(), bad); err == nil {
+				t.Errorf("UseContext should reject %q", bad)
+			}
+			if _, err := dd.DetectClusterDrift(context.Background(), &config.AppSpec{Name: bad}, "default", ""); err == nil {
+				t.Errorf("DetectClusterDrift should reject workload %q", bad)
+			}
+			if _, err := dd.DetectClusterDrift(context.Background(), spec, bad, ""); err == nil {
+				t.Errorf("DetectClusterDrift should reject namespace %q", bad)
+			}
+			if _, err := dd.DetectClusterDrift(context.Background(), spec, "default", bad); err == nil {
+				t.Errorf("DetectClusterDrift should reject context %q", bad)
+			}
+		}
 	})
 }

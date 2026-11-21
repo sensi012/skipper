@@ -37,30 +37,69 @@ type ExternalSecretOptions struct {
 	GCPProjectID    string                 `json:"gcpProjectID,omitempty"`
 }
 
+func validateVaultPathSegment(val, field string) (string, error) {
+	trimmed := strings.Trim(strings.TrimSpace(val), "/")
+	if trimmed == "" {
+		return "", fmt.Errorf("%s must not be empty", field)
+	}
+	if strings.ContainsAny(trimmed, "\\?#\r\n\x00") {
+		return "", fmt.Errorf("invalid %s %q: contains prohibited characters", field, val)
+	}
+	for _, seg := range strings.Split(trimmed, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("invalid %s %q: path traversal is not allowed", field, val)
+		}
+	}
+	return trimmed, nil
+}
+
+func sanitizeVaultError(msg, token string) string {
+	clean := strings.TrimSpace(msg)
+	if token != "" {
+		clean = strings.ReplaceAll(clean, token, "[REDACTED]")
+	}
+	if len(clean) > 256 {
+		clean = clean[:256] + "...(truncated)"
+	}
+	return clean
+}
+
 // GenerateExternalSecretManifest generates a multi-document Kubernetes YAML
 // containing a SecretStore and ExternalSecret (external-secrets.io/v1beta1)
 // for Vault, AWS Secrets Manager, or GCP Secret Manager.
 func GenerateExternalSecretManifest(opts ExternalSecretOptions, keys []string) (string, error) {
 	name := strings.TrimSpace(opts.Name)
-	if name == "" {
-		return "", fmt.Errorf("external secret name must not be empty")
+	if name == "" || strings.HasPrefix(name, "-") || strings.ContainsAny(name, " \t\r\n\x00") {
+		return "", fmt.Errorf("external secret name must be a non-empty valid identifier")
 	}
-	remotePath := strings.TrimSpace(opts.RemotePath)
-	if remotePath == "" {
-		return "", fmt.Errorf("remote secret path must not be empty")
+	remotePath, err := validateVaultPathSegment(opts.RemotePath, "remote secret path")
+	if err != nil {
+		return "", err
 	}
 
 	ns := strings.TrimSpace(opts.Namespace)
 	if ns == "" {
 		ns = "default"
+	} else if strings.HasPrefix(ns, "-") || strings.ContainsAny(ns, " \t\r\n\x00") {
+		return "", fmt.Errorf("invalid namespace %q", ns)
 	}
 	storeName := strings.TrimSpace(opts.StoreName)
 	if storeName == "" {
 		storeName = name + "-store"
+	} else if strings.HasPrefix(storeName, "-") || strings.ContainsAny(storeName, " \t\r\n\x00") {
+		return "", fmt.Errorf("invalid storeName %q", storeName)
 	}
 	refresh := strings.TrimSpace(opts.RefreshInterval)
 	if refresh == "" {
 		refresh = "1h"
+	} else if strings.ContainsAny(refresh, " \t\r\n\x00") {
+		return "", fmt.Errorf("invalid refreshInterval %q", refresh)
+	}
+
+	for _, k := range keys {
+		if err := validateSecretKey(k); err != nil {
+			return "", err
+		}
 	}
 
 	provider := ExternalSecretProvider(strings.ToLower(strings.TrimSpace(string(opts.Provider))))
@@ -193,13 +232,17 @@ func (c *VaultSyncClient) httpClient() *http.Client {
 }
 
 func (c *VaultSyncClient) kvV2URL(mount, secretPath string) (string, error) {
-	m := strings.Trim(strings.TrimSpace(mount), "/")
-	if m == "" {
-		m = "secret"
+	rawMount := strings.TrimSpace(mount)
+	if rawMount == "" {
+		rawMount = "secret"
 	}
-	p := strings.Trim(strings.TrimSpace(secretPath), "/")
-	if p == "" {
-		return "", fmt.Errorf("secret path must not be empty")
+	m, err := validateVaultPathSegment(rawMount, "vault mount")
+	if err != nil {
+		return "", err
+	}
+	p, err := validateVaultPathSegment(secretPath, "secret path")
+	if err != nil {
+		return "", err
 	}
 	return fmt.Sprintf("%s/v1/%s/data/%s", strings.TrimRight(c.Address, "/"), m, p), nil
 }
@@ -229,16 +272,16 @@ func (c *VaultSyncClient) Push(ctx context.Context, mount, secretPath string, se
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("vault push request failed: %w", err)
+		return fmt.Errorf("vault push request failed: %s", sanitizeVaultError(err.Error(), c.Token))
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("vault authentication/authorization failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return fmt.Errorf("vault authentication/authorization failed (HTTP %d): %s", resp.StatusCode, sanitizeVaultError(string(respBody), c.Token))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("vault push failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return fmt.Errorf("vault push failed (HTTP %d): %s", resp.StatusCode, sanitizeVaultError(string(respBody), c.Token))
 	}
 	return nil
 }
@@ -261,19 +304,19 @@ func (c *VaultSyncClient) Pull(ctx context.Context, mount, secretPath string) (m
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("vault pull request failed: %w", err)
+		return nil, fmt.Errorf("vault pull request failed: %s", sanitizeVaultError(err.Error(), c.Token))
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("vault authentication/authorization failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return nil, fmt.Errorf("vault authentication/authorization failed (HTTP %d): %s", resp.StatusCode, sanitizeVaultError(string(respBody), c.Token))
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("vault secret not found at %s (HTTP 404)", secretPath)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("vault pull failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return nil, fmt.Errorf("vault pull failed (HTTP %d): %s", resp.StatusCode, sanitizeVaultError(string(respBody), c.Token))
 	}
 
 	var envelope struct {

@@ -74,6 +74,10 @@ func NewGovernanceEngine() *GovernanceEngine {
 
 // EvaluatePolicies audits an AppSpec against organizational security and resource policies
 func (g *GovernanceEngine) EvaluatePolicies(spec *config.AppSpec) ([]PolicyViolation, error) {
+	if spec == nil {
+		return nil, fmt.Errorf("app spec must not be nil")
+	}
+
 	var violations []PolicyViolation
 
 	// Policy 1: Mandatory team tag
@@ -232,6 +236,15 @@ func (g *GovernanceEngine) queryPrometheusMetrics(ctx context.Context, baseURL, 
 }
 
 func queryPromScalar(ctx context.Context, client *http.Client, baseURL, promQL string) (float64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && (client == nil || client.Timeout == 0) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
+
 	endpoint := fmt.Sprintf("%s/api/v1/query?query=%s", strings.TrimRight(baseURL, "/"), url.QueryEscape(promQL))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -244,7 +257,7 @@ func queryPromScalar(ctx context.Context, client *http.Client, baseURL, promQL s
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
 	if err != nil {
 		return 0, err
 	}
@@ -305,6 +318,15 @@ func extractPromValue(pair []interface{}) (float64, error) {
 }
 
 func (g *GovernanceEngine) queryKubectlTop(ctx context.Context, workload, namespace string) (float64, float64, error) {
+	workload = strings.TrimSpace(workload)
+	namespace = strings.TrimSpace(namespace)
+	if workload == "" || strings.HasPrefix(workload, "-") || strings.ContainsAny(workload, " \t\r\n/\\") {
+		return 0, 0, fmt.Errorf("invalid workload name %q for kubectl top", workload)
+	}
+	if namespace == "" || strings.HasPrefix(namespace, "-") || strings.ContainsAny(namespace, " \t\r\n/\\") {
+		return 0, 0, fmt.Errorf("invalid namespace %q for kubectl top", namespace)
+	}
+
 	execFn := g.execCommand
 	if execFn == nil {
 		execFn = exec.CommandContext

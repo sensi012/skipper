@@ -244,5 +244,14 @@ func TestSBOMGenerator_ExternalTools(t *testing.T) {
 		if _, err := gen.Generate(context.Background(), SBOMOptions{Format: "invalid"}); err == nil {
 			t.Fatal("expected error for invalid format")
 		}
+		if _, err := gen.Generate(context.Background(), SBOMOptions{Target: "--output=/etc/passwd"}); err == nil {
+			t.Fatal("expected error for flag-injection target starting with '-'")
+		}
+		if _, err := gen.Generate(context.Background(), SBOMOptions{Target: "app\n--bad"}); err == nil {
+			t.Fatal("expected error for target with control chars")
+		}
+		if _, err := gen.Generate(context.Background(), SBOMOptions{Target: ".", OutputPath: "bad\x00path.json"}); err == nil {
+			t.Fatal("expected error for OutputPath with null byte")
+		}
 	})
 }

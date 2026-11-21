@@ -30,10 +30,21 @@ type DoctorReport struct {
 	Passed    bool              `json:"passed"`
 }
 
-type DoctorEngine struct{}
+type DoctorEngine struct {
+	execCommand func(ctx context.Context, name string, arg ...string) *exec.Cmd
+}
 
 func NewDoctorEngine() *DoctorEngine {
-	return &DoctorEngine{}
+	return &DoctorEngine{
+		execCommand: exec.CommandContext,
+	}
+}
+
+func (d *DoctorEngine) command(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	if d.execCommand != nil {
+		return d.execCommand(ctx, name, arg...)
+	}
+	return exec.CommandContext(ctx, name, arg...)
 }
 
 func (d *DoctorEngine) RunDiagnostics(ctx context.Context) *DoctorReport {
@@ -58,7 +69,7 @@ func (d *DoctorEngine) RunDiagnostics(ctx context.Context) *DoctorReport {
 }
 
 func (d *DoctorEngine) checkDocker(ctx context.Context) DiagnosticCheck {
-	cmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
+	cmd := d.command(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return DiagnosticCheck{
@@ -76,7 +87,7 @@ func (d *DoctorEngine) checkDocker(ctx context.Context) DiagnosticCheck {
 }
 
 func (d *DoctorEngine) checkKubectl(ctx context.Context) DiagnosticCheck {
-	cmd := exec.CommandContext(ctx, "kubectl", "version", "--client", "--output=json")
+	cmd := d.command(ctx, "kubectl", "version", "--client", "--output=json")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return DiagnosticCheck{
@@ -95,7 +106,7 @@ func (d *DoctorEngine) checkKubectl(ctx context.Context) DiagnosticCheck {
 }
 
 func (d *DoctorEngine) checkKind(ctx context.Context) DiagnosticCheck {
-	cmd := exec.CommandContext(ctx, "kind", "version")
+	cmd := d.command(ctx, "kind", "version")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return DiagnosticCheck{

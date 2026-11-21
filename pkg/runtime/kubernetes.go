@@ -51,6 +51,9 @@ func (k *KubernetesAdapter) Initialize(ctx context.Context) error {
 }
 
 func (k *KubernetesAdapter) Deploy(ctx context.Context, spec *config.AppSpec) (*WorkloadStatus, error) {
+	if err := validateOptionalSafeArg("namespace", k.Namespace); err != nil {
+		return nil, err
+	}
 	manifest, err := k.GenerateStandardManifests(spec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate manifests: %w", err)
@@ -67,6 +70,12 @@ func (k *KubernetesAdapter) Deploy(ctx context.Context, spec *config.AppSpec) (*
 }
 
 func (k *KubernetesAdapter) Status(ctx context.Context, workloadName string) (*WorkloadStatus, error) {
+	if err := validateSafeArg("workload name", workloadName); err != nil {
+		return nil, err
+	}
+	if err := validateOptionalSafeArg("namespace", k.Namespace); err != nil {
+		return nil, err
+	}
 	cmd := k.command(ctx, "kubectl", "get", "deployment", workloadName, "-n", k.Namespace, "-o", "jsonpath={.status.replicas}|{.status.availableReplicas}")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -105,11 +114,26 @@ func (k *KubernetesAdapter) Status(ctx context.Context, workloadName string) (*W
 }
 
 func (k *KubernetesAdapter) Stop(ctx context.Context, workloadName string) error {
+	if err := validateSafeArg("workload name", workloadName); err != nil {
+		return err
+	}
+	if err := validateOptionalSafeArg("namespace", k.Namespace); err != nil {
+		return err
+	}
 	cmd := k.command(ctx, "kubectl", "scale", "deployment", workloadName, "-n", k.Namespace, "--replicas=0")
 	return cmd.Run()
 }
 
 func (k *KubernetesAdapter) Logs(ctx context.Context, workloadName string, opts LogOptions, out io.Writer) error {
+	if err := validateSafeArg("workload name", workloadName); err != nil {
+		return err
+	}
+	if err := validateOptionalSafeArg("namespace", k.Namespace); err != nil {
+		return err
+	}
+	if err := validateOptionalSafeArg("container", opts.Container); err != nil {
+		return err
+	}
 	args := []string{"logs", fmt.Sprintf("deployment/%s", workloadName), "-n", k.Namespace}
 	if opts.Follow {
 		args = append(args, "-f")
@@ -131,6 +155,21 @@ func (k *KubernetesAdapter) Logs(ctx context.Context, workloadName string, opts 
 }
 
 func (k *KubernetesAdapter) Debug(ctx context.Context, opts DebugOptions, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	if err := validateOptionalSafeArg("namespace", k.Namespace); err != nil {
+		return 1, err
+	}
+	if err := validateOptionalSafeArg("workload name", opts.WorkloadName); err != nil {
+		return 1, err
+	}
+	if err := validateOptionalSafeArg("target pod", opts.TargetPod); err != nil {
+		return 1, err
+	}
+	if err := validateOptionalSafeArg("target container", opts.TargetContainer); err != nil {
+		return 1, err
+	}
+	if err := validateOptionalSafeArg("debug image", opts.DebugImage); err != nil {
+		return 1, err
+	}
 	// Native ephemeral container debug session
 	targetPod := opts.TargetPod
 	if targetPod == "" {
@@ -175,6 +214,12 @@ func (k *KubernetesAdapter) Debug(ctx context.Context, opts DebugOptions, stdin 
 func (k *KubernetesAdapter) GenerateStandardManifests(spec *config.AppSpec) (string, error) {
 	if spec == nil || strings.TrimSpace(spec.Name) == "" {
 		return "", fmt.Errorf("app spec with a non-empty name is required")
+	}
+	if err := validateSafeArg("workload name", spec.Name); err != nil {
+		return "", err
+	}
+	if err := validateOptionalSafeArg("image", spec.Image); err != nil {
+		return "", err
 	}
 
 	replicas := 1

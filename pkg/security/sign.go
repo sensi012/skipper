@@ -73,12 +73,20 @@ func (s *ImageSigner) Sign(ctx context.Context, opts SignOptions) (*SignResult, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	image := strings.TrimSpace(opts.Image)
-	if image == "" {
-		return nil, fmt.Errorf("image reference must not be empty")
+	image, err := validateSafeArg(opts.Image, "image reference", true)
+	if err != nil {
+		return nil, err
 	}
 
 	keyRef := strings.TrimSpace(opts.KeyRef)
+	if keyRef != "" {
+		if keyRef, err = validateSafeArg(keyRef, "key reference", false); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateAnnotations(opts.Annotations); err != nil {
+		return nil, err
+	}
 	keyless := keyRef == ""
 
 	args := []string{"sign"}
@@ -127,12 +135,30 @@ func (s *ImageSigner) Verify(ctx context.Context, opts VerifyOptions) (*VerifyRe
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	image := strings.TrimSpace(opts.Image)
-	if image == "" {
-		return nil, fmt.Errorf("image reference must not be empty")
+	image, err := validateSafeArg(opts.Image, "image reference", true)
+	if err != nil {
+		return nil, err
 	}
 
 	keyRef := strings.TrimSpace(opts.KeyRef)
+	if keyRef != "" {
+		if keyRef, err = validateSafeArg(keyRef, "key reference", false); err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(opts.CertificateIdentity) != "" {
+		if _, err := validateSafeArg(opts.CertificateIdentity, "certificate identity", true); err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(opts.CertificateIssuer) != "" {
+		if _, err := validateSafeArg(opts.CertificateIssuer, "certificate issuer", true); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateAnnotations(opts.Annotations); err != nil {
+		return nil, err
+	}
 	keyless := keyRef == ""
 
 	args := []string{"verify"}
@@ -180,6 +206,22 @@ func (s *ImageSigner) Verify(ctx context.Context, opts VerifyOptions) (*VerifyRe
 	}
 	res.Verified = true
 	return res, nil
+}
+
+func validateAnnotations(m map[string]string) error {
+	for k, v := range m {
+		tk := strings.TrimSpace(k)
+		if tk == "" || tk != k {
+			return fmt.Errorf("invalid annotation key %q: must not be empty or contain surrounding whitespace", k)
+		}
+		if strings.HasPrefix(tk, "-") || strings.ContainsAny(tk, "= \t\r\n\x00") {
+			return fmt.Errorf("invalid annotation key %q: must not start with '-' or contain '=' or whitespace/control characters", k)
+		}
+		if strings.ContainsAny(v, "\r\n\x00") {
+			return fmt.Errorf("invalid annotation value for key %q: must not contain control characters", k)
+		}
+	}
+	return nil
 }
 
 func sortedAnnotationPairs(m map[string]string) []string {

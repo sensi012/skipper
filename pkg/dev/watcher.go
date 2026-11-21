@@ -17,11 +17,11 @@ import (
 )
 
 type DevOptions struct {
-	WatchDir    string
-	Debounce    time.Duration
-	Spec        *config.AppSpec
-	RuntimeEng  runtime.RuntimeEngine
-	Builder     build.BuilderEngine
+	WatchDir   string
+	Debounce   time.Duration
+	Spec       *config.AppSpec
+	RuntimeEng runtime.RuntimeEngine
+	Builder    build.BuilderEngine
 }
 
 type DevServer struct {

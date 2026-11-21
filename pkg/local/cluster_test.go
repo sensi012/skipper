@@ -154,7 +154,7 @@ func TestKindManagerCreate(t *testing.T) {
 		var calls [][]string
 		km := &KindManager{
 			execCommand: makeFakeExec([]fakeStep{
-				{stdout: ""},               // kind get clusters
+				{stdout: ""},                // kind get clusters
 				{stdout: "cluster created"}, // kind create cluster
 			}, &calls),
 		}
@@ -255,5 +255,20 @@ func TestKindManagerLiveSafeExistsCheck(t *testing.T) {
 	}
 	if exists {
 		t.Fatalf("expected nonexistent test cluster not to exist")
+	}
+}
+
+func TestKindManagerFlagInjectionRejection(t *testing.T) {
+	km := NewKindManager()
+	for _, bad := range []string{"--kubeconfig=/etc/passwd", "-n", "cluster with space", "cluster\nnewline"} {
+		if _, err := km.Exists(context.Background(), bad); err == nil {
+			t.Errorf("Exists should reject unsafe cluster name %q", bad)
+		}
+		if err := km.Create(context.Background(), bad); err == nil {
+			t.Errorf("Create should reject unsafe cluster name %q", bad)
+		}
+		if err := km.Delete(context.Background(), bad); err == nil {
+			t.Errorf("Delete should reject unsafe cluster name %q", bad)
+		}
 	}
 }

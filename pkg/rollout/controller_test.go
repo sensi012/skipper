@@ -15,7 +15,7 @@ type mockRuntimeEngine struct {
 	state string
 }
 
-func (m *mockRuntimeEngine) Name() string { return "mock" }
+func (m *mockRuntimeEngine) Name() string                         { return "mock" }
 func (m *mockRuntimeEngine) Initialize(ctx context.Context) error { return nil }
 func (m *mockRuntimeEngine) Deploy(ctx context.Context, spec *config.AppSpec) (*runtime.WorkloadStatus, error) {
 	return &runtime.WorkloadStatus{Name: spec.Name, State: m.state}, nil
@@ -73,5 +73,34 @@ func TestExecuteCanaryAutoRollback(t *testing.T) {
 
 	if status.Phase != "RolledBack" {
 		t.Fatalf("expected RolledBack phase, got %+v", status)
+	}
+}
+
+func TestExecuteCanaryValidationAndCancellation(t *testing.T) {
+	mock := &mockRuntimeEngine{state: "Running"}
+	ctrl := NewController(mock)
+
+	if _, err := ctrl.ExecuteCanary(context.Background(), nil, RolloutConfig{}, nil); err == nil {
+		t.Error("expected error for nil spec")
+	}
+	if _, err := (&Controller{}).ExecuteCanary(context.Background(), &config.AppSpec{Name: "app"}, RolloutConfig{}, nil); err == nil {
+		t.Error("expected error for nil runtime engine")
+	}
+
+	// Nil writer and default steps with pre-cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ctrl.ExecuteCanary(ctx, &config.AppSpec{Name: "app"}, RolloutConfig{}, nil); err == nil {
+		t.Error("expected context cancellation error")
+	}
+
+	// Context cancelled during StepInterval sleep
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel2()
+	if _, err := ctrl.ExecuteCanary(ctx2, &config.AppSpec{Name: "app"}, RolloutConfig{
+		CanarySteps:  []int{10, 100},
+		StepInterval: 500 * time.Millisecond,
+	}, nil); err == nil {
+		t.Error("expected timeout error during StepInterval wait")
 	}
 }

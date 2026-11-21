@@ -164,8 +164,66 @@ func (b *CNBBuilder) Detect(ctx context.Context, sourceDir string) (*DetectionRe
 	}, nil
 }
 
+func validateBuildArg(val, field string, disallowWhitespace bool) (string, error) {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s must not be empty", field)
+	}
+	if strings.HasPrefix(trimmed, "-") {
+		return "", fmt.Errorf("invalid %s %q: must not start with '-'", field, val)
+	}
+	if strings.ContainsAny(trimmed, "\r\n\x00") {
+		return "", fmt.Errorf("invalid %s: must not contain control characters", field)
+	}
+	if disallowWhitespace && strings.ContainsAny(trimmed, " \t") {
+		return "", fmt.Errorf("invalid %s %q: must not contain whitespace", field, val)
+	}
+	return trimmed, nil
+}
+
+func validateBuildArgsMap(buildArgs map[string]string) error {
+	for k, v := range buildArgs {
+		tk := strings.TrimSpace(k)
+		if tk == "" || tk != k || strings.HasPrefix(tk, "-") || strings.ContainsAny(tk, "= \t\r\n\x00") {
+			return fmt.Errorf("invalid build arg key %q", k)
+		}
+		if strings.ContainsAny(v, "\r\n\x00") {
+			return fmt.Errorf("invalid build arg value for %q: must not contain control characters", k)
+		}
+	}
+	return nil
+}
+
+func resolveSafeDockerfilePath(sourceDir, dockerfile string) (string, error) {
+	df, err := validateBuildArg(dockerfile, "dockerfile path", false)
+	if err != nil {
+		return "", err
+	}
+	for _, part := range strings.FieldsFunc(df, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return "", fmt.Errorf("invalid dockerfile path %q: must not traverse outside build context", dockerfile)
+		}
+	}
+	if filepath.IsAbs(df) {
+		return filepath.Clean(df), nil
+	}
+	absSource, err := filepath.Abs(sourceDir)
+	if err != nil {
+		return "", fmt.Errorf("invalid build context %q: %w", sourceDir, err)
+	}
+	joined := filepath.Join(absSource, df)
+	rel, err := filepath.Rel(absSource, joined)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid dockerfile path %q: must not traverse outside build context", dockerfile)
+	}
+	return filepath.Join(sourceDir, df), nil
+}
+
 // Build compiles source code into an OCI image
 func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Writer) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if spec == nil {
 		return "", fmt.Errorf("app spec must not be nil")
 	}
@@ -173,9 +231,24 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 		out = io.Discard
 	}
 
-	sourceDir := spec.Build.Context
+	sourceDir := strings.TrimSpace(spec.Build.Context)
 	if sourceDir == "" {
 		sourceDir = "."
+	} else {
+		var err error
+		sourceDir, err = validateBuildArg(sourceDir, "build context", false)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	if strings.TrimSpace(spec.Build.Target) != "" {
+		if _, err := validateBuildArg(spec.Build.Target, "build target", true); err != nil {
+			return "", err
+		}
+	}
+	if err := validateBuildArgsMap(spec.Build.Args); err != nil {
+		return "", err
 	}
 
 	detection, err := b.Detect(ctx, sourceDir)
@@ -183,15 +256,19 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 		return "", fmt.Errorf("language detection failed: %w", err)
 	}
 
-	targetTag := spec.Image
+	targetTag := strings.TrimSpace(spec.Image)
 	if targetTag == "" {
 		if strings.TrimSpace(spec.Name) == "" {
 			return "", fmt.Errorf("either spec.Image or spec.Name must be specified")
 		}
-		targetTag = fmt.Sprintf("%s:latest", spec.Name)
+		targetTag = fmt.Sprintf("%s:latest", strings.TrimSpace(spec.Name))
+	}
+	targetTag, err = validateBuildArg(targetTag, "target image tag", true)
+	if err != nil {
+		return "", err
 	}
 
-	if detection.Runtime == RuntimeUnknown && spec.Build.Dockerfile == "" {
+	if detection.Runtime == RuntimeUnknown && strings.TrimSpace(spec.Build.Dockerfile) == "" {
 		absDir, absErr := filepath.Abs(sourceDir)
 		if absErr != nil {
 			absDir = sourceDir
@@ -212,11 +289,15 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 	// Check if pack CLI is available
 	hasPack := b.execCmd(ctx, nil, nil, nil, "pack", "version") == nil
 
-	if hasPack && detection.Runtime != RuntimeDockerfile && spec.Build.Dockerfile == "" {
+	if hasPack && detection.Runtime != RuntimeDockerfile && strings.TrimSpace(spec.Build.Dockerfile) == "" {
 		// Use native Cloud Native Buildpacks via pack CLI
-		builder := spec.Build.Builder
+		builder := strings.TrimSpace(spec.Build.Builder)
 		if builder == "" {
 			builder = detection.Builder
+		}
+		builder, err = validateBuildArg(builder, "CNB builder", true)
+		if err != nil {
+			return "", err
 		}
 		_, _ = fmt.Fprintf(out, "==> Building OCI image with Cloud Native Buildpacks (Builder: %s)...\n", builder)
 		if err := b.execCmd(ctx, nil, out, out, "pack", "build", targetTag, "--path", sourceDir, "--builder", builder); err != nil {
@@ -226,14 +307,14 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 	}
 
 	// Fallback path: If Dockerfile exists or explicit Dockerfile is configured, use Docker BuildKit
-	if detection.Runtime == RuntimeDockerfile || spec.Build.Dockerfile != "" {
+	if detection.Runtime == RuntimeDockerfile || strings.TrimSpace(spec.Build.Dockerfile) != "" {
 		dockerfile := "Dockerfile"
-		if spec.Build.Dockerfile != "" {
-			dockerfile = spec.Build.Dockerfile
+		if strings.TrimSpace(spec.Build.Dockerfile) != "" {
+			dockerfile = strings.TrimSpace(spec.Build.Dockerfile)
 		}
-		dfPath := dockerfile
-		if !filepath.IsAbs(dfPath) {
-			dfPath = filepath.Join(sourceDir, dockerfile)
+		dfPath, err := resolveSafeDockerfilePath(sourceDir, dockerfile)
+		if err != nil {
+			return "", err
 		}
 		_, _ = fmt.Fprintf(out, "==> Building OCI image via Docker BuildKit with %s...\n", dockerfile)
 		buildArgs := []string{"build", "-t", targetTag, "-f", dfPath}

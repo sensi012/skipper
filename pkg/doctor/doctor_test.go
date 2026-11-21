@@ -2,9 +2,23 @@ package doctor
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"os"
+	"os/exec"
 	"testing"
 )
+
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	fmt.Fprint(os.Stdout, os.Getenv("HELPER_STDOUT"))
+	if os.Getenv("HELPER_EXIT_CODE") == "1" {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
 
 func TestDoctorPortConflicts(t *testing.T) {
 	engine := NewDoctorEngine()
@@ -34,5 +48,27 @@ func TestDoctorEngineRun(t *testing.T) {
 	}
 	if len(report.Checks) == 0 {
 		t.Fatalf("expected diagnostic checks in report")
+	}
+}
+
+func TestDoctorEngineFailureAndWarningBranches(t *testing.T) {
+	engine := &DoctorEngine{
+		execCommand: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			cs := append([]string{"-test.run=TestHelperProcess", "--", name}, args...)
+			cmd := exec.CommandContext(ctx, os.Args[0], cs...)
+			cmd.Env = append(os.Environ(),
+				"GO_WANT_HELPER_PROCESS=1",
+				"HELPER_EXIT_CODE=1",
+			)
+			return cmd
+		},
+	}
+
+	report := engine.RunDiagnostics(context.Background())
+	if report.Passed {
+		t.Fatalf("expected report.Passed=false when Docker check fails")
+	}
+	if report.Checks[0].Status != StatusFail || report.Checks[1].Status != StatusWarn || report.Checks[2].Status != StatusWarn {
+		t.Fatalf("expected FAIL/WARN/WARN for docker/kubectl/kind failure branch, got %+v", report.Checks[:3])
 	}
 }

@@ -21,7 +21,7 @@ func TestEphemeralSandboxKubernetesLaunchAndLedger(t *testing.T) {
 	launcher := NewEphemeralSandboxLauncher(ledger)
 	launcher.execCommand = makeFakeExec([]fakeStep{
 		{stdout: "orders-api-6d9f-abc\n", exitCode: 0}, // kubectl get pods
-		{stdout: "connected\n", exitCode: 0},            // kubectl debug
+		{stdout: "connected\n", exitCode: 0},           // kubectl debug
 	}, &calls)
 
 	var out, errBuf bytes.Buffer
@@ -140,6 +140,19 @@ func TestEphemeralSandboxDockerAndDryRun(t *testing.T) {
 		launcher.execCommand = makeFakeExec([]fakeStep{{stdout: "  \n", exitCode: 0}}, nil)
 		if _, err := launcher.Launch(context.Background(), EphemeralSandboxOptions{WorkloadName: "ghost"}, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "no pods found") {
 			t.Fatalf("expected no pods found error, got %v", err)
+		}
+
+		for _, opts := range []EphemeralSandboxOptions{
+			{WorkloadName: "--privileged", Runtime: "docker"},
+			{WorkloadName: "app", DebugImage: "--network=host", Runtime: "docker"},
+			{WorkloadName: "app", Namespace: "-n", Runtime: "kubernetes", DryRun: true},
+			{TargetPod: "--pod", Runtime: "kubernetes", DryRun: true},
+			{WorkloadName: "app", TargetContainer: "-c", Runtime: "kubernetes", DryRun: true},
+			{WorkloadName: "app", CopyPod: true, CopyPodName: "--copy", Runtime: "kubernetes", DryRun: true},
+		} {
+			if _, _, _, err := launcher.BuildCommand(context.Background(), opts); err == nil {
+				t.Errorf("expected BuildCommand to reject unsafe options %+v", opts)
+			}
 		}
 	})
 }

@@ -95,6 +95,15 @@ func TestScanImage_ValidationAndContext(t *testing.T) {
 	if _, err := scanner.ScanImage(context.Background(), "   ", &bytes.Buffer{}); err == nil {
 		t.Fatal("expected error for empty image name")
 	}
+	if _, err := scanner.ScanImage(context.Background(), "--output=/etc/passwd", &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for flag-injection image name starting with '-'")
+	}
+	if _, err := scanner.ScanImage(context.Background(), "alpine:latest --privileged", &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for image name containing whitespace")
+	}
+	if _, err := scanner.ScanImage(context.Background(), "alpine:latest\n--flag", &bytes.Buffer{}); err == nil {
+		t.Fatal("expected error for image name containing newline")
+	}
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()

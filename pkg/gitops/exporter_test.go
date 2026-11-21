@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sensi012/skipper/pkg/config"
@@ -207,4 +208,103 @@ func TestExportDefaultsAndValidation(t *testing.T) {
 	if _, err := Export(spec, ExportOptions{Engine: Engine("unknown")}); err == nil {
 		t.Error("expected error for unsupported engine")
 	}
+}
+
+func TestExportSecurityAndTraversalPrevention(t *testing.T) {
+	validSpec := &config.AppSpec{Name: "billing-api"}
+
+	cases := []struct {
+		name string
+		spec *config.AppSpec
+		opts ExportOptions
+	}{
+		{
+			name: "environment path traversal",
+			spec: validSpec,
+			opts: ExportOptions{Environment: "../../etc", OutputDir: t.TempDir()},
+		},
+		{
+			name: "environment slash separator",
+			spec: validSpec,
+			opts: ExportOptions{Environment: "prod/sub"},
+		},
+		{
+			name: "app name path traversal",
+			spec: &config.AppSpec{Name: "../malicious"},
+			opts: ExportOptions{},
+		},
+		{
+			name: "app name leading dash",
+			spec: &config.AppSpec{Name: "-flag-app"},
+			opts: ExportOptions{},
+		},
+		{
+			name: "namespace injection",
+			spec: validSpec,
+			opts: ExportOptions{Namespace: "prod\n  injected: true"},
+		},
+		{
+			name: "targetPath traversal",
+			spec: validSpec,
+			opts: ExportOptions{TargetPath: "../../secret"},
+		},
+		{
+			name: "targetPath absolute path",
+			spec: validSpec,
+			opts: ExportOptions{TargetPath: "/etc/passwd"},
+		},
+		{
+			name: "targetPath backslash",
+			spec: validSpec,
+			opts: ExportOptions{TargetPath: `overlays\..\secret`},
+		},
+		{
+			name: "branch newline injection",
+			spec: validSpec,
+			opts: ExportOptions{Branch: "main\n    path: /hack"},
+		},
+		{
+			name: "repoURL leading dash",
+			spec: validSpec,
+			opts: ExportOptions{RepoURL: "--upload-pack=evil"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Export(tc.spec, tc.opts); err == nil {
+				t.Errorf("expected security validation error for case %q, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestExportConcurrency(t *testing.T) {
+	spec := &config.AppSpec{
+		Name: "concurrent-app",
+		Endpoints: []config.EndpointConfig{
+			{Name: "http", Port: 8080},
+		},
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			eng := EngineArgoCD
+			if idx%2 == 1 {
+				eng = EngineFlux
+			}
+			res, err := Export(spec, ExportOptions{
+				Engine:      eng,
+				Environment: "prod",
+				Namespace:   "default",
+			})
+			if err != nil || len(res.Files) == 0 {
+				t.Errorf("concurrent export %d failed: err=%v", idx, err)
+			}
+		}(i)
+	}
+	wg.Wait()
 }

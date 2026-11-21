@@ -6,9 +6,26 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sensi012/skipper/pkg/opmem"
 )
+
+func validateDiagArg(label, val string) error {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return fmt.Errorf("%s is required", label)
+	}
+	if strings.HasPrefix(trimmed, "-") {
+		return fmt.Errorf("invalid %s %q: must not start with '-'", label, val)
+	}
+	for _, r := range trimmed {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("invalid %s %q: must not contain whitespace or control characters", label, val)
+		}
+	}
+	return nil
+}
 
 // IncidentSeverity ranks diagnostic findings
 type IncidentSeverity string
@@ -256,32 +273,58 @@ func (d *DNSResolutionDetector) Evaluate(ctx context.Context, ns, workload, logs
 
 // ContextGroundedEngine combines deterministic findings with operational memory RAG for AI-grade diagnosis
 type ContextGroundedEngine struct {
-	Matrix *DeterministicMatrix
-	Ledger *opmem.OperationalMemoryLedger
+	Matrix      *DeterministicMatrix
+	Ledger      *opmem.OperationalMemoryLedger
+	execCommand func(ctx context.Context, name string, arg ...string) *exec.Cmd
 }
 
 // NewContextGroundedEngine constructs the unified diagnostic reasoning engine
 func NewContextGroundedEngine(ledger *opmem.OperationalMemoryLedger) *ContextGroundedEngine {
 	return &ContextGroundedEngine{
-		Matrix: NewDeterministicMatrix(ledger),
-		Ledger: ledger,
+		Matrix:      NewDeterministicMatrix(ledger),
+		Ledger:      ledger,
+		execCommand: exec.CommandContext,
 	}
+}
+
+func (e *ContextGroundedEngine) command(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	if e.execCommand != nil {
+		return e.execCommand(ctx, name, arg...)
+	}
+	return exec.CommandContext(ctx, name, arg...)
 }
 
 // RunDiagnostics executes the full deterministic + contextual analysis
 func (e *ContextGroundedEngine) RunDiagnostics(ctx context.Context, ns, workload string) ([]DiagnosticFinding, error) {
+	if err := validateDiagArg("workload name", workload); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(ns) == "" {
+		ns = "default"
+	}
+	if err := validateDiagArg("namespace", ns); err != nil {
+		return nil, err
+	}
+
 	// 1. Gather recent logs from target
 	tailLogs := ""
-	cmd := exec.CommandContext(ctx, "kubectl", "logs", fmt.Sprintf("deployment/%s", workload), "-n", ns, "--tail=100")
+	cmd := e.command(ctx, "kubectl", "logs", fmt.Sprintf("deployment/%s", workload), "-n", ns, "--tail=100")
 	if out, err := cmd.CombinedOutput(); err == nil {
 		tailLogs = string(out)
 	}
 
 	// 2. Query recent operational changes
-	timeline, _ := e.Ledger.QueryTimeline(workload, 1*time.Hour)
+	var timeline []opmem.CausalEvent
+	if e.Ledger != nil {
+		timeline, _ = e.Ledger.QueryTimeline(workload, 1*time.Hour)
+	}
 
 	// 3. Evaluate deterministic matrix
-	findings, err := e.Matrix.Diagnose(ctx, ns, workload, tailLogs)
+	matrix := e.Matrix
+	if matrix == nil {
+		matrix = NewDeterministicMatrix(e.Ledger)
+	}
+	findings, err := matrix.Diagnose(ctx, ns, workload, tailLogs)
 	if err != nil {
 		return nil, err
 	}

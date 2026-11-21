@@ -173,13 +173,13 @@ func TestDockerDeployWithDependencies(t *testing.T) {
 		var calls [][]string
 		d := &DockerAdapter{
 			execCommand: makeFakeExec([]fakeStep{
-				{exitCode: 0},                                      // docker network create
-				{exitCode: 0},                                      // docker rm -f orders-db
-				{stdout: "db-container\n", exitCode: 0},            // docker run db
-				{exitCode: 0},                                      // docker rm -f orders-cache-1
-				{stdout: "cache-container\n", exitCode: 0},         // docker run cache-1
-				{exitCode: 0},                                      // docker rm -f orders
-				{stdout: "app-container\n", exitCode: 0},           // docker run orders
+				{exitCode: 0},                           // docker network create
+				{exitCode: 0},                           // docker rm -f orders-db
+				{stdout: "db-container\n", exitCode: 0}, // docker run db
+				{exitCode: 0},                           // docker rm -f orders-cache-1
+				{stdout: "cache-container\n", exitCode: 0}, // docker run cache-1
+				{exitCode: 0},                            // docker rm -f orders
+				{stdout: "app-container\n", exitCode: 0}, // docker run orders
 				{stdout: "running|true|2026-11-21T06:00:00Z", exitCode: 0}, // docker inspect
 			}, &calls),
 		}
@@ -361,10 +361,10 @@ func TestDockerStopCleansUpDependencies(t *testing.T) {
 		var calls [][]string
 		d := &DockerAdapter{
 			execCommand: makeFakeExec([]fakeStep{
-				{exitCode: 0},                          // docker stop orders
+				{exitCode: 0},                           // docker stop orders
 				{stdout: "dep-1\ndep-2\n", exitCode: 0}, // docker ps -aq --filter label=skipper.parent=orders
-				{exitCode: 0},                          // docker rm -f dep-1 dep-2
-				{exitCode: 0},                          // docker network rm skipper-orders-net
+				{exitCode: 0},                           // docker rm -f dep-1 dep-2
+				{exitCode: 0},                           // docker network rm skipper-orders-net
 			}, &calls),
 		}
 

@@ -197,6 +197,12 @@ func (d *DockerAdapter) Deploy(ctx context.Context, spec *config.AppSpec) (*Work
 	if spec == nil || strings.TrimSpace(spec.Name) == "" {
 		return nil, fmt.Errorf("app spec with a non-empty name is required")
 	}
+	if err := validateSafeArg("workload name", spec.Name); err != nil {
+		return nil, err
+	}
+	if err := validateOptionalSafeArg("image", spec.Image); err != nil {
+		return nil, err
+	}
 
 	var networkName string
 	var extraEnv []config.EnvVar
@@ -259,6 +265,9 @@ func (d *DockerAdapter) Deploy(ctx context.Context, spec *config.AppSpec) (*Work
 }
 
 func (d *DockerAdapter) Status(ctx context.Context, workloadName string) (*WorkloadStatus, error) {
+	if err := validateSafeArg("workload name", workloadName); err != nil {
+		return nil, err
+	}
 	cmd := d.command(ctx, "docker", "inspect", workloadName, "--format", "{{.State.Status}}|{{.State.Running}}|{{.Created}}")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -294,6 +303,9 @@ func (d *DockerAdapter) Status(ctx context.Context, workloadName string) (*Workl
 }
 
 func (d *DockerAdapter) Stop(ctx context.Context, workloadName string) error {
+	if err := validateSafeArg("workload name", workloadName); err != nil {
+		return err
+	}
 	cmd := d.command(ctx, "docker", "stop", workloadName)
 	if err := cmd.Run(); err != nil {
 		return err
@@ -321,6 +333,9 @@ func (d *DockerAdapter) Stop(ctx context.Context, workloadName string) error {
 }
 
 func (d *DockerAdapter) Logs(ctx context.Context, workloadName string, opts LogOptions, out io.Writer) error {
+	if err := validateSafeArg("workload name", workloadName); err != nil {
+		return err
+	}
 	args := []string{"logs"}
 	if opts.Follow {
 		args = append(args, "-f")
@@ -340,6 +355,9 @@ func (d *DockerAdapter) Logs(ctx context.Context, workloadName string, opts LogO
 }
 
 func (d *DockerAdapter) Debug(ctx context.Context, opts DebugOptions, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	if err := validateSafeArg("workload name", opts.WorkloadName); err != nil {
+		return 1, err
+	}
 	// Execute interactive command inside target container
 	args := []string{"exec", "-it", opts.WorkloadName}
 	if len(opts.Command) > 0 {

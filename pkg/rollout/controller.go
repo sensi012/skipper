@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/sensi012/skipper/pkg/config"
@@ -21,20 +22,20 @@ const (
 
 // RolloutConfig controls progressive delivery parameters
 type RolloutConfig struct {
-	Strategy       StrategyType
-	CanarySteps    []int         // e.g. [10, 25, 50, 100] percent traffic
-	StepInterval   time.Duration // Time between traffic steps
-	MaxErrorRate   float64       // e.g. 0.01 (1%) threshold triggering rollback
-	MaxP99Latency  time.Duration // e.g. 500ms
-	AutoRollback   bool
+	Strategy      StrategyType
+	CanarySteps   []int         // e.g. [10, 25, 50, 100] percent traffic
+	StepInterval  time.Duration // Time between traffic steps
+	MaxErrorRate  float64       // e.g. 0.01 (1%) threshold triggering rollback
+	MaxP99Latency time.Duration // e.g. 500ms
+	AutoRollback  bool
 }
 
 // RolloutStatus represents the live progression of a deployment
 type RolloutStatus struct {
-	Phase          string // InProgress, Promoted, RolledBack, Failed
-	CurrentWeight  int    // Percent traffic routed to new revision
-	MetricsHealth  string // Healthy, Degraded
-	Message        string
+	Phase         string // InProgress, Promoted, RolledBack, Failed
+	CurrentWeight int    // Percent traffic routed to new revision
+	MetricsHealth string // Healthy, Degraded
+	Message       string
 }
 
 // HealthCheckFunc evaluates custom external health signals (e.g. Prometheus/OTel metrics)
@@ -61,6 +62,19 @@ func (c *Controller) SetHealthCheck(fn HealthCheckFunc) {
 
 // ExecuteCanary runs a progressive canary rollout with simulated health evaluation gates
 func (c *Controller) ExecuteCanary(ctx context.Context, spec *config.AppSpec, cfg RolloutConfig, out io.Writer) (*RolloutStatus, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if spec == nil || strings.TrimSpace(spec.Name) == "" {
+		return nil, fmt.Errorf("app spec and name must not be empty")
+	}
+	if c == nil || c.Engine == nil {
+		return nil, fmt.Errorf("runtime engine must not be nil")
+	}
+	if out == nil {
+		out = io.Discard
+	}
+
 	steps := cfg.CanarySteps
 	if len(steps) == 0 {
 		steps = []int{10, 25, 50, 100}
@@ -73,16 +87,19 @@ func (c *Controller) ExecuteCanary(ctx context.Context, spec *config.AppSpec, cf
 	_, _ = fmt.Fprintf(out, "==> Initiating Canary Rollout for '%s' [Strategy: %s, Steps: %v]\n", spec.Name, cfg.Strategy, steps)
 
 	for _, weight := range steps {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 
 		_, _ = fmt.Fprintf(out, "--> Shifting traffic to Canary revision: %d%% traffic...\n", weight)
 
-		// Verification gate: query health and metric signals
-		time.Sleep(interval)
+		// Verification gate: wait for interval (cancel-aware) then query health and metric signals
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
+		}
+
 		healthy, metricErr := c.evaluateHealthGate(ctx, spec, cfg)
 		if !healthy {
 			_, _ = fmt.Fprintf(out, "!! Health gate evaluation failed at %d%% traffic: %v\n", weight, metricErr)

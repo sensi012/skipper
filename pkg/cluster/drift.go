@@ -352,8 +352,17 @@ func (d *DriftDetector) DetectClusterDrift(ctx context.Context, spec *config.App
 	if spec == nil || strings.TrimSpace(spec.Name) == "" {
 		return nil, fmt.Errorf("app spec with a non-empty name is required")
 	}
+	if err := validateClusterArg("workload name", spec.Name); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(namespace) == "" {
 		namespace = "default"
+	}
+	if err := validateClusterArg("namespace", namespace); err != nil {
+		return nil, err
+	}
+	if err := validateOptionalClusterArg("context name", contextName); err != nil {
+		return nil, err
 	}
 
 	k8s := runtime.NewKubernetesAdapter(namespace)

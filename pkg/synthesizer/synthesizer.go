@@ -3,16 +3,18 @@ package synthesizer
 import (
 	"bytes"
 	"fmt"
+	"strings"
+
 	"github.com/sensi012/skipper/pkg/config"
 )
 
 // ManifestBundle holds all generated production-ready Kubernetes YAML manifests
 type ManifestBundle struct {
-	Deployment     string
-	Service        string
-	ConfigMap      string
-	NetworkPolicy  string
-	PodDisruption  string
+	Deployment    string
+	Service       string
+	ConfigMap     string
+	NetworkPolicy string
+	PodDisruption string
 }
 
 // FullYaml concatenates all manifests into a single multi-document YAML stream
@@ -53,8 +55,26 @@ func NewSynthesizer() *Synthesizer {
 
 // Synthesize transforms an AppSpec into a complete, secure Kubernetes manifest bundle
 func (s *Synthesizer) Synthesize(spec *config.AppSpec, namespace string) (*ManifestBundle, error) {
+	if spec == nil {
+		return nil, fmt.Errorf("app spec must not be nil")
+	}
+	if strings.TrimSpace(spec.Name) == "" {
+		return nil, fmt.Errorf("app spec name must not be empty")
+	}
+	if strings.ContainsAny(spec.Name, "\r\n\x00/\\") || strings.HasPrefix(strings.TrimSpace(spec.Name), "-") {
+		return nil, fmt.Errorf("invalid app spec name %q", spec.Name)
+	}
+
+	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {
 		namespace = "default"
+	}
+	if strings.ContainsAny(namespace, "\r\n\x00/\\ ") || strings.HasPrefix(namespace, "-") {
+		return nil, fmt.Errorf("invalid namespace %q", namespace)
+	}
+
+	if s == nil {
+		s = NewSynthesizer()
 	}
 
 	bundle := &ManifestBundle{}
@@ -81,19 +101,31 @@ func (s *Synthesizer) generateDeployment(spec *config.AppSpec, ns string) string
 	}
 
 	cpuReq := s.DefaultCPURequest
+	if cpuReq == "" {
+		cpuReq = "100m"
+	}
 	if spec.Runtime.Resources.CPU.Request != "" {
 		cpuReq = spec.Runtime.Resources.CPU.Request
 	}
 	cpuLim := s.DefaultCPULimit
+	if cpuLim == "" {
+		cpuLim = "500m"
+	}
 	if spec.Runtime.Resources.CPU.Limit != "" {
 		cpuLim = spec.Runtime.Resources.CPU.Limit
 	}
 
 	memReq := s.DefaultMemoryRequest
+	if memReq == "" {
+		memReq = "128Mi"
+	}
 	if spec.Runtime.Resources.Memory.Request != "" {
 		memReq = spec.Runtime.Resources.Memory.Request
 	}
 	memLim := s.DefaultMemoryLimit
+	if memLim == "" {
+		memLim = "512Mi"
+	}
 	if spec.Runtime.Resources.Memory.Limit != "" {
 		memLim = spec.Runtime.Resources.Memory.Limit
 	}

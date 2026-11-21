@@ -99,6 +99,9 @@ func LoadComposeProject(path string) (*ComposeProject, error) {
 
 	svcMap := make(map[string]ProjectService, len(compose.Services))
 	for name, svc := range compose.Services {
+		if strings.TrimSpace(name) == "" || strings.HasPrefix(strings.TrimSpace(name), "-") || strings.ContainsAny(name, " \t\r\n/\\") {
+			return nil, fmt.Errorf("invalid compose service name %q", name)
+		}
 		image := interpolateVars(svc.Image, lookup)
 		hasBuild, rawCtx, dockerfile, target, args := parseBuildConfig(svc.Build, lookup, true)
 
@@ -156,7 +159,7 @@ func LoadComposeProject(path string) (*ComposeProject, error) {
 }
 
 // SanitizeName normalizes a project or service name to lowercase [a-z0-9_-],
-// falling back to "app" if empty.
+// stripping leading/trailing '-' or '_' and falling back to "app" if empty.
 func SanitizeName(raw string) string {
 	lower := strings.ToLower(strings.TrimSpace(raw))
 	var b strings.Builder
@@ -165,7 +168,7 @@ func SanitizeName(raw string) string {
 			b.WriteRune(r)
 		}
 	}
-	out := b.String()
+	out := strings.Trim(b.String(), "-_")
 	if out == "" {
 		return "app"
 	}

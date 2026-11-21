@@ -1,11 +1,14 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -657,4 +660,205 @@ spec:
 			t.Fatal("expected tool error for missing configPath")
 		}
 	})
+}
+
+func TestMCPToolSchemasAndGuardrails(t *testing.T) {
+	srv := NewMCPServer()
+	tools := srv.srv.ListTools()
+	if len(tools) != 10 {
+		t.Fatalf("expected 10 tools, got %d", len(tools))
+	}
+
+	for name, st := range tools {
+		if st.Tool.InputSchema.Type != "object" {
+			t.Errorf("tool %s expected InputSchema.Type='object', got %q", name, st.Tool.InputSchema.Type)
+		}
+		if strings.TrimSpace(st.Tool.Description) == "" {
+			t.Errorf("tool %s has empty description", name)
+		}
+	}
+
+	t.Run("panic recovery returns structured tool error instead of crashing", func(t *testing.T) {
+		wrapped := wrapToolHandler("test_panic", func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			panic("simulated nil dereference")
+		})
+		res, err := wrapped(context.Background(), mcp.CallToolRequest{})
+		if err != nil {
+			t.Fatalf("expected nil error on recovered panic, got %v", err)
+		}
+		if res == nil || !res.IsError || !strings.Contains(extractText(t, res), "internal error in test_panic") {
+			t.Fatalf("expected recovered tool error, got %+v", res)
+		}
+	})
+
+	t.Run("cancelled context returns structured tool error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		wrapped := wrapToolHandler("test_cancel", handleDoctor)
+		res, err := wrapped(ctx, mcp.CallToolRequest{})
+		if err != nil {
+			t.Fatalf("unexpected protocol error: %v", err)
+		}
+		if res == nil || !res.IsError || !strings.Contains(extractText(t, res), "aborted") {
+			t.Fatalf("expected cancelled tool error, got %+v", res)
+		}
+	})
+
+	t.Run("init rejects flag injection and out-of-range port", func(t *testing.T) {
+		res, _ := handleInit(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Arguments: map[string]interface{}{"name": "--malicious"}},
+		})
+		if !res.IsError {
+			t.Error("expected error for flag-injected workload name")
+		}
+
+		res, _ = handleInit(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Arguments: map[string]interface{}{"name": "valid-app", "port": 70000}},
+		})
+		if !res.IsError {
+			t.Error("expected error for port > 65535")
+		}
+	})
+
+	t.Run("rollback rejects flag injection", func(t *testing.T) {
+		res, _ := handleRollback(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Arguments: map[string]interface{}{"workload": "--help"}},
+		})
+		if !res.IsError {
+			t.Error("expected error for flag-injected workload in rollback")
+		}
+	})
+}
+
+func TestMCPBloatTruncation(t *testing.T) {
+	bigText := strings.Repeat("A", MaxToolOutputBytes+4096)
+	wrapped := wrapToolHandler("test_bloat", func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText(bigText), nil
+	})
+	res, err := wrapped(context.Background(), mcp.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := extractText(t, res)
+	if len(out) != MaxToolOutputBytes {
+		t.Fatalf("expected output bounded to %d bytes, got %d", MaxToolOutputBytes, len(out))
+	}
+	if !strings.Contains(out, "[truncated: output exceeded") {
+		t.Fatalf("expected truncation notice at end of output")
+	}
+
+	// Also verify oversized logs input bounding
+	hugeLogs := strings.Repeat("x", maxInputLogBytes+1024) + "\nOut of memory: Killed process 1 exit code 137"
+	diagRes, err := handleDiagnose(context.Background(), mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Arguments: map[string]interface{}{
+				"workload": "oom-app",
+				"logs":     hugeLogs,
+			},
+		},
+	})
+	if err != nil || diagRes.IsError {
+		t.Fatalf("expected huge logs diagnosis to succeed: err=%v res=%+v", err, diagRes)
+	}
+	if !strings.Contains(strings.ToLower(extractText(t, diagRes)), "oom") {
+		t.Fatalf("expected OOM finding preserved in bounded tail logs")
+	}
+}
+
+func TestMCPStdioFramingAndEOF(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+
+	cfgPath := writeTempSpec(t, validSkipperYAML)
+	cfgJSON, _ := json.Marshal(cfgPath)
+
+	requests := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"qa-test","version":"1.0"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
+		fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"skipper_policy_check","arguments":{"configPath":%s}}}`, string(cfgJSON)),
+		fmt.Sprintf(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"skipper_manifest","arguments":{"configPath":%s,"namespace":"prod"}}}`, string(cfgJSON)),
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"skipper_diagnose","arguments":{"workload":"api","logs":"Out of memory: Killed process 9 exit code 137"}}}`,
+		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"skipper_rollback","arguments":{"workload":"api","dryRun":true}}}`,
+		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"skipper_investigate_incident","arguments":{"workload":"api","logs":"CrashLoopBackOff"}}}`,
+	}
+
+	stdin := strings.NewReader(strings.Join(requests, "\n") + "\n")
+	var stdout, stderr bytes.Buffer
+
+	srv := NewMCPServer()
+	if err := srv.ServeIO(context.Background(), stdin, &stdout, &stderr); err != nil {
+		t.Fatalf("ServeIO returned unexpected error on EOF: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 7 { // 7 request IDs (notification produces no response)
+		t.Fatalf("expected 7 JSON-RPC response lines on stdout, got %d:\n%s", len(lines), stdout.String())
+	}
+
+	for i, line := range lines {
+		var envelope map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &envelope); err != nil {
+			t.Fatalf("stdout line %d is not valid JSON-RPC (stdout pollution detected!): %v\nLine: %s", i+1, err, line)
+		}
+		if envelope["jsonrpc"] != "2.0" {
+			t.Errorf("stdout line %d missing jsonrpc=2.0: %s", i+1, line)
+		}
+	}
+}
+
+func TestMCPConcurrentToolCalls(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+
+	cfgPath := writeTempSpec(t, validSkipperYAML)
+	cfgJSON, _ := json.Marshal(cfgPath)
+
+	srv := NewMCPServer()
+	ctx := context.Background()
+
+	const workers = 60
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			var payload string
+			switch id % 6 {
+			case 0:
+				payload = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"skipper_policy_check","arguments":{"configPath":%s}}}`, id, string(cfgJSON))
+			case 1:
+				payload = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"skipper_manifest","arguments":{"configPath":%s,"namespace":"prod"}}}`, id, string(cfgJSON))
+			case 2:
+				payload = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"skipper_diagnose","arguments":{"workload":"svc-%d","logs":"CrashLoopBackOff"}}}`, id, id)
+			case 3:
+				payload = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"skipper_rollback","arguments":{"workload":"svc-%d","dryRun":true}}}`, id, id%5)
+			case 4:
+				payload = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"skipper_investigate_incident","arguments":{"workload":"svc-%d","logs":"Out of memory: Killed process"}}}`, id, id%5)
+			case 5:
+				payload = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"skipper_rightsize","arguments":{"configPath":%s}}}`, id, string(cfgJSON))
+			}
+
+			resp := srv.srv.HandleMessage(ctx, json.RawMessage(payload))
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				errCh <- fmt.Errorf("worker %d marshal failed: %w", id, err)
+				return
+			}
+			if strings.Contains(string(raw), `"isError":true`) {
+				errCh <- fmt.Errorf("worker %d got unexpected tool error: %s", id, string(raw))
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
 }

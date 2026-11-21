@@ -88,11 +88,19 @@ func TestGenerateExternalSecretManifest(t *testing.T) {
 			{Name: "s", Provider: ProviderVault},                                          // missing remotePath
 			{Name: "s", Provider: ProviderGCP, RemotePath: "a/b"},                         // missing gcpProjectID
 			{Name: "s", Provider: ExternalSecretProvider("azure"), RemotePath: "a/b"},     // unsupported provider
+			{Name: "s", Provider: ProviderVault, RemotePath: "../../sys/raw"},             // path traversal in remotePath
+			{Name: "-bad", Provider: ProviderVault, RemotePath: "a/b"},                    // leading hyphen in name
+			{Name: "s", Namespace: "bad\nns", Provider: ProviderVault, RemotePath: "a/b"}, // newline in namespace
 		}
 		for i, tc := range cases {
 			if _, err := GenerateExternalSecretManifest(tc, nil); err == nil {
 				t.Errorf("case %d: expected validation error, got nil", i)
 			}
+		}
+		if _, err := GenerateExternalSecretManifest(ExternalSecretOptions{
+			Name: "s", Provider: ProviderVault, RemotePath: "a/b",
+		}, []string{"BAD=KEY"}); err == nil {
+			t.Error("expected validation error for invalid secret key in ExternalSecret")
 		}
 	})
 }
@@ -188,13 +196,22 @@ func TestVaultSyncClient(t *testing.T) {
 		}
 	})
 
-	t.Run("empty path and canceled context", func(t *testing.T) {
+	t.Run("empty path, path traversal, token redaction, and canceled context", func(t *testing.T) {
 		client, _ := NewVaultSyncClient(srv.URL, "valid-token")
 		if err := client.Push(context.Background(), "secret", "", map[string]string{}); err == nil {
 			t.Fatal("expected error for empty path on Push")
 		}
 		if _, err := client.Pull(context.Background(), "secret", ""); err == nil {
 			t.Fatal("expected error for empty path on Pull")
+		}
+		if err := client.Push(context.Background(), "secret", "../../sys/policies", map[string]string{}); err == nil {
+			t.Fatal("expected path traversal rejection in secretPath on Push")
+		}
+		if _, err := client.Pull(context.Background(), "../sys", "apps/orders"); err == nil {
+			t.Fatal("expected path traversal rejection in mount on Pull")
+		}
+		if got := sanitizeVaultError("failed with token super-secret-tok", "super-secret-tok"); strings.Contains(got, "super-secret-tok") || !strings.Contains(got, "[REDACTED]") {
+			t.Fatalf("expected token to be redacted in error message, got %q", got)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()

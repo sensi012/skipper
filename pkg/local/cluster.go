@@ -6,7 +6,24 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"unicode"
 )
+
+func validateClusterName(name string) error {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return fmt.Errorf("cluster name cannot be empty")
+	}
+	if strings.HasPrefix(trimmed, "-") {
+		return fmt.Errorf("invalid cluster name %q: must not start with '-'", name)
+	}
+	for _, r := range trimmed {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("invalid cluster name %q: must not contain whitespace or control characters", name)
+		}
+	}
+	return nil
+}
 
 // ClusterManager defines the lifecycle interface for ephemeral local dev clusters
 type ClusterManager interface {
@@ -44,6 +61,9 @@ func (k *KindManager) Exists(ctx context.Context, clusterName string) (bool, err
 	clusterName = strings.TrimSpace(clusterName)
 	if clusterName == "" {
 		return false, nil
+	}
+	if err := validateClusterName(clusterName); err != nil {
+		return false, err
 	}
 
 	cmd := k.command(ctx, "kind", "get", "clusters")
@@ -85,8 +105,8 @@ nodes:
 // Create provisions a lightweight local development cluster with ingress ready port mappings
 func (k *KindManager) Create(ctx context.Context, clusterName string) error {
 	clusterName = strings.TrimSpace(clusterName)
-	if clusterName == "" {
-		return fmt.Errorf("cluster name cannot be empty")
+	if err := validateClusterName(clusterName); err != nil {
+		return err
 	}
 
 	exists, err := k.Exists(ctx, clusterName)
@@ -116,8 +136,8 @@ func (k *KindManager) Create(ctx context.Context, clusterName string) error {
 // Delete removes the local development cluster
 func (k *KindManager) Delete(ctx context.Context, clusterName string) error {
 	clusterName = strings.TrimSpace(clusterName)
-	if clusterName == "" {
-		return fmt.Errorf("cluster name cannot be empty")
+	if err := validateClusterName(clusterName); err != nil {
+		return err
 	}
 
 	cmd := k.command(ctx, "kind", "delete", "cluster", "--name", clusterName)

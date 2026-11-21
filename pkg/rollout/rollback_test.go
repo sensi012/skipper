@@ -94,6 +94,24 @@ func TestRollbackManager_BuildCommand(t *testing.T) {
 			t.Fatalf("expected %q, got %q", want, got)
 		}
 	})
+
+	t.Run("RejectsFlagInjectionAndUnsafeTokens", func(t *testing.T) {
+		badCases := []RollbackOptions{
+			{WorkloadName: "--privileged"},
+			{WorkloadName: "app/../../etc"},
+			{WorkloadName: "app name"},
+			{WorkloadName: "app", Namespace: "-n"},
+			{WorkloadName: "app", Namespace: "ns/sub"},
+			{WorkloadName: "app", ContextName: "--kubeconfig=/etc/passwd"},
+			{WorkloadName: "app", Revision: "--v=9"},
+			{WorkloadName: "app", Revision: "1 2"},
+		}
+		for _, tc := range badCases {
+			if _, _, err := mgr.BuildCommand(tc); err == nil {
+				t.Errorf("expected BuildCommand to reject unsafe options %+v", tc)
+			}
+		}
+	})
 }
 
 func TestRollbackManager_ExecuteDryRunWithLedger(t *testing.T) {

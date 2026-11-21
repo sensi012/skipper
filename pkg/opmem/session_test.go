@@ -98,3 +98,98 @@ func TestRecordDebugSessionWithEventAndReplay(t *testing.T) {
 		}
 	}
 }
+
+func TestLedgerPathTraversalNilAndConcurrentMixedStress(t *testing.T) {
+	ledger, err := NewOperationalMemoryLedger(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create ledger: %v", err)
+	}
+
+	// Nil record guards
+	if err := ledger.RecordChange(nil); err == nil {
+		t.Fatalf("expected error for nil ChangeRecord")
+	}
+	if err := ledger.RecordDebugSession(nil); err == nil {
+		t.Fatalf("expected error for nil DebugSessionRecord")
+	}
+	if err := ledger.RecordTelemetryEvent(nil); err == nil {
+		t.Fatalf("expected error for nil CausalEvent")
+	}
+
+	// Path traversal and unsafe SessionID rejection
+	unsafeIDs := []string{
+		"../../etc/passwd",
+		"../secret",
+		"dir/sess-1",
+		`dir\sess-1`,
+		"-flag-inject",
+		".hidden",
+		"id with space",
+		"id\nnewline",
+	}
+	for _, badID := range unsafeIDs {
+		if err := ledger.RecordDebugSession(&DebugSessionRecord{SessionID: badID, WorkloadName: "api"}); err == nil {
+			t.Errorf("RecordDebugSession should reject unsafe SessionID %q", badID)
+		}
+		if err := ledger.RecordDebugSessionWithEvent(&DebugSessionRecord{SessionID: badID, WorkloadName: "api"}); err == nil {
+			t.Errorf("RecordDebugSessionWithEvent should reject unsafe SessionID %q", badID)
+		}
+		if _, err := ledger.GetDebugSession(badID); err == nil {
+			t.Errorf("GetDebugSession should reject unsafe SessionID %q", badID)
+		}
+	}
+
+	// Concurrent mixed read/write stress test across all ledger methods
+	const workers = 12
+	const opsPerWorker = 8
+	errCh := make(chan error, workers*opsPerWorker*4)
+	doneCh := make(chan struct{})
+
+	for w := 0; w < workers; w++ {
+		go func(workerID int) {
+			defer func() { doneCh <- struct{}{} }()
+			for i := 0; i < opsPerWorker; i++ {
+				sid := "sess-" + time.Now().UTC().Format("150405") + "-" + string(rune('a'+(workerID%26))) + "-" + string(rune('0'+(i%10)))
+				if err := ledger.RecordChange(&ChangeRecord{
+					ID:         "chg-" + sid,
+					Timestamp:  time.Now().UTC(),
+					ChangeType: "image_rollout",
+					TargetWorkload: TargetWorkload{
+						Namespace: "default",
+						Name:      "api",
+						Kind:      "Deployment",
+					},
+				}); err != nil {
+					errCh <- err
+				}
+				if err := ledger.RecordDebugSessionWithEvent(&DebugSessionRecord{
+					SessionID:    sid,
+					WorkloadName: "api",
+					TargetPod:    "api-pod",
+					Runtime:      "kubernetes",
+				}); err != nil {
+					errCh <- err
+				}
+				if _, err := ledger.QueryTimeline("api", time.Hour); err != nil {
+					errCh <- err
+				}
+				if _, err := ledger.ListDebugSessions("api"); err != nil {
+					errCh <- err
+				}
+			}
+		}(w)
+	}
+
+	for w := 0; w < workers; w++ {
+		<-doneCh
+	}
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent ledger operation error: %v", err)
+	}
+
+	sessions, err := ledger.ListDebugSessions("api")
+	if err != nil || len(sessions) != workers*opsPerWorker {
+		t.Fatalf("expected %d debug sessions, got %d (err=%v)", workers*opsPerWorker, len(sessions), err)
+	}
+}

@@ -55,6 +55,12 @@ func mockGovExecCommand(stdout, stderr string, fail bool, captured *[]string) fu
 func TestEvaluatePolicies(t *testing.T) {
 	gov := NewGovernanceEngine()
 
+	t.Run("NilSpecReturnsError", func(t *testing.T) {
+		if _, err := gov.EvaluatePolicies(nil); err == nil {
+			t.Fatal("expected error for nil spec")
+		}
+	})
+
 	t.Run("AllPassing", func(t *testing.T) {
 		spec := &config.AppSpec{
 			Name: "order-service",

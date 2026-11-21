@@ -7,7 +7,24 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"unicode"
 )
+
+func validateTunnelArg(label, val string) error {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return fmt.Errorf("%s is required", label)
+	}
+	if strings.HasPrefix(trimmed, "-") {
+		return fmt.Errorf("invalid %s %q: must not start with '-'", label, val)
+	}
+	for _, r := range trimmed {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("invalid %s %q: must not contain whitespace or control characters", label, val)
+		}
+	}
+	return nil
+}
 
 type PortForwardOptions struct {
 	Namespace    string
@@ -37,6 +54,12 @@ func (p *PortForwarder) Forward(ctx context.Context, opts PortForwardOptions, ou
 	if strings.TrimSpace(opts.WorkloadName) == "" {
 		return fmt.Errorf("workload name is required for port-forward")
 	}
+	if err := validateTunnelArg("workload name", opts.WorkloadName); err != nil {
+		return err
+	}
+	if opts.LocalPort < 1 || opts.LocalPort > 65535 || opts.RemotePort < 1 || opts.RemotePort > 65535 {
+		return fmt.Errorf("ports %d:%d out of valid range (1-65535)", opts.LocalPort, opts.RemotePort)
+	}
 	if out == nil {
 		out = io.Discard
 	}
@@ -44,9 +67,12 @@ func (p *PortForwarder) Forward(ctx context.Context, opts PortForwardOptions, ou
 		errOut = io.Discard
 	}
 
-	ns := opts.Namespace
+	ns := strings.TrimSpace(opts.Namespace)
 	if ns == "" {
 		ns = "default"
+	}
+	if err := validateTunnelArg("namespace", ns); err != nil {
+		return err
 	}
 
 	target := fmt.Sprintf("deployment/%s", opts.WorkloadName)

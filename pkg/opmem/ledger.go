@@ -8,7 +8,27 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
+
+func validateSessionID(id string) error {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return fmt.Errorf("session ID is required")
+	}
+	if strings.Contains(trimmed, "..") || strings.ContainsAny(trimmed, `/\`) {
+		return fmt.Errorf("invalid session ID %q: path traversal or separators not allowed", id)
+	}
+	if strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, ".") {
+		return fmt.Errorf("invalid session ID %q: must not start with '-' or '.'", id)
+	}
+	for _, r := range trimmed {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("invalid session ID %q: whitespace or control characters not allowed", id)
+		}
+	}
+	return nil
+}
 
 // ChangeActor represents who or what triggered a system mutation
 type ChangeActor struct {
@@ -46,11 +66,11 @@ type ChangeRecord struct {
 
 // ExecutedCommand records an interactive command executed inside a debug container
 type ExecutedCommand struct {
-	Command        string    `json:"command"`
-	ExecutedAt     time.Time `json:"executedAt"`
-	ExitCode       int       `json:"exitCode"`
-	StdoutSnippet  string    `json:"stdoutSnippet,omitempty"`
-	StderrSnippet  string    `json:"stderrSnippet,omitempty"`
+	Command       string    `json:"command"`
+	ExecutedAt    time.Time `json:"executedAt"`
+	ExitCode      int       `json:"exitCode"`
+	StdoutSnippet string    `json:"stdoutSnippet,omitempty"`
+	StderrSnippet string    `json:"stderrSnippet,omitempty"`
 }
 
 // DebugSessionRecord preserves ephemeral troubleshooting sessions permanently
@@ -99,6 +119,9 @@ func NewOperationalMemoryLedger(storageDir string) (*OperationalMemoryLedger, er
 
 // RecordChange writes a mutation to the immutable append-only ledger
 func (l *OperationalMemoryLedger) RecordChange(rec *ChangeRecord) error {
+	if rec == nil {
+		return fmt.Errorf("change record cannot be nil")
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -120,9 +143,21 @@ func (l *OperationalMemoryLedger) RecordChange(rec *ChangeRecord) error {
 
 // RecordDebugSession saves a completed interactive debug session
 func (l *OperationalMemoryLedger) RecordDebugSession(sess *DebugSessionRecord) error {
+	if sess == nil {
+		return fmt.Errorf("debug session record cannot be nil")
+	}
+	if strings.TrimSpace(sess.SessionID) != "" {
+		if err := validateSessionID(sess.SessionID); err != nil {
+			return err
+		}
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	return l.recordDebugSessionLocked(sess)
+}
+
+func (l *OperationalMemoryLedger) recordDebugSessionLocked(sess *DebugSessionRecord) error {
 	sessPath := filepath.Join(l.storageDir, "debug-sessions.jsonl")
 	data, err := json.Marshal(sess)
 	if err != nil {
@@ -141,9 +176,16 @@ func (l *OperationalMemoryLedger) RecordDebugSession(sess *DebugSessionRecord) e
 
 // RecordTelemetryEvent records an eBPF or runtime signal into the causal ledger
 func (l *OperationalMemoryLedger) RecordTelemetryEvent(evt *CausalEvent) error {
+	if evt == nil {
+		return fmt.Errorf("causal event cannot be nil")
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	return l.recordTelemetryEventLocked(evt)
+}
+
+func (l *OperationalMemoryLedger) recordTelemetryEventLocked(evt *CausalEvent) error {
 	evtPath := filepath.Join(l.storageDir, "events.jsonl")
 	data, err := json.Marshal(evt)
 	if err != nil {

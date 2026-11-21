@@ -52,3 +52,23 @@ services:
 		t.Fatalf("expected 256Mi memory limit, got %s", spec.Runtime.Resources.Memory.Limit)
 	}
 }
+
+func TestTranspileSecurityAndEdgeCases(t *testing.T) {
+	if got := SanitizeName("--privileged"); got != "privileged" {
+		t.Fatalf("expected SanitizeName('--privileged') == 'privileged', got %q", got)
+	}
+	if got := SanitizeName("---"); got != "app" {
+		t.Fatalf("expected SanitizeName('---') == 'app', got %q", got)
+	}
+
+	tr := NewTranspiler()
+	if _, err := tr.TranspileCompose([]byte("services:\n  -evil:\n    image: alpine\n"), "-evil"); err == nil {
+		t.Fatalf("expected TranspileCompose to reject service name starting with '-'")
+	}
+	if _, err := tr.TranspileCompose([]byte("services: {}\n"), ""); err == nil {
+		t.Fatalf("expected TranspileCompose to reject empty services map")
+	}
+	if _, err := tr.TranspileCompose([]byte("services:\n  web:\n    image: nginx\n"), "missing"); err == nil {
+		t.Fatalf("expected TranspileCompose to reject missing target service")
+	}
+}

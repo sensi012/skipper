@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/sensi012/skipper/pkg/config"
 )
@@ -100,11 +101,20 @@ func SynthesizeOTelConfig(spec *config.AppSpec, opts OTelOptions) (string, error
 	if spec == nil {
 		return "", fmt.Errorf("app spec must not be nil")
 	}
-	if spec.Name == "" {
+	if strings.TrimSpace(spec.Name) == "" {
 		return "", fmt.Errorf("app spec name must not be empty")
+	}
+	if strings.ContainsAny(spec.Name, "\r\n\x00/\\") || strings.HasPrefix(strings.TrimSpace(spec.Name), "-") {
+		return "", fmt.Errorf("invalid app spec name %q", spec.Name)
 	}
 
 	resolved := resolveOTelOptions(spec, opts)
+	if strings.ContainsAny(resolved.Namespace, "\r\n\x00/\\ ") || strings.HasPrefix(resolved.Namespace, "-") {
+		return "", fmt.Errorf("invalid namespace %q", resolved.Namespace)
+	}
+	if strings.ContainsAny(resolved.MetricsPath, "\r\n\x00") || strings.ContainsAny(resolved.MetricsPortName, "\r\n\x00 ") {
+		return "", fmt.Errorf("invalid OTel metrics configuration")
+	}
 	envVars := OTelEnvVars(spec, resolved)
 
 	var buf bytes.Buffer

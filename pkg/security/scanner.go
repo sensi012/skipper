@@ -45,10 +45,29 @@ func (t *TrivyScanner) execCmd(ctx context.Context, name string, args ...string)
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
-func (t *TrivyScanner) ScanImage(ctx context.Context, imageName string, out io.Writer) (*VulnerabilityScanResult, error) {
-	if strings.TrimSpace(imageName) == "" {
-		return nil, fmt.Errorf("image name must not be empty")
+func validateSafeArg(val, field string, disallowWhitespace bool) (string, error) {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s must not be empty", field)
 	}
+	if strings.HasPrefix(trimmed, "-") {
+		return "", fmt.Errorf("invalid %s %q: must not start with '-'", field, val)
+	}
+	if strings.ContainsAny(trimmed, "\r\n\x00") {
+		return "", fmt.Errorf("invalid %s: must not contain control characters", field)
+	}
+	if disallowWhitespace && strings.ContainsAny(trimmed, " \t") {
+		return "", fmt.Errorf("invalid %s %q: must not contain whitespace", field, val)
+	}
+	return trimmed, nil
+}
+
+func (t *TrivyScanner) ScanImage(ctx context.Context, imageName string, out io.Writer) (*VulnerabilityScanResult, error) {
+	cleanImage, err := validateSafeArg(imageName, "image name", true)
+	if err != nil {
+		return nil, err
+	}
+	imageName = cleanImage
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

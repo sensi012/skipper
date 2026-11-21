@@ -92,6 +92,19 @@ func (g *SBOMGenerator) Generate(ctx context.Context, opts SBOMOptions) (*SBOMRe
 	target := strings.TrimSpace(opts.Target)
 	if target == "" {
 		target = "."
+	} else {
+		cleanTarget, err := validateSafeArg(target, "SBOM target", false)
+		if err != nil {
+			return nil, err
+		}
+		target = cleanTarget
+	}
+
+	if opts.OutputPath != "" {
+		if strings.ContainsAny(opts.OutputPath, "\r\n\x00") {
+			return nil, fmt.Errorf("invalid SBOM output path: must not contain control characters")
+		}
+		opts.OutputPath = filepath.Clean(opts.OutputPath)
 	}
 
 	var doc []byte
