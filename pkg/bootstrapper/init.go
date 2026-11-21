@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/unified-platform/container/pkg/build"
-	"github.com/unified-platform/container/pkg/config"
+	"github.com/sensi012/skipper/pkg/build"
+	"github.com/sensi012/skipper/pkg/config"
 	"gopkg.in/yaml.v3"
 )
 

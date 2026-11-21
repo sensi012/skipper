@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unified-platform/container/pkg/config"
-	"github.com/unified-platform/container/pkg/runtime"
+	"github.com/sensi012/skipper/pkg/config"
+	"github.com/sensi012/skipper/pkg/runtime"
 )
 
 type mockRuntimeEngine struct {

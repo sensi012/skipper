@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/unified-platform/container/pkg/config"
+	"github.com/sensi012/skipper/pkg/config"
 	"gopkg.in/yaml.v3"
 )
 

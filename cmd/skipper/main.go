@@ -4,28 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/unified-platform/container/pkg/bootstrapper"
-	"github.com/unified-platform/container/pkg/build"
-	"github.com/unified-platform/container/pkg/config"
-	"github.com/unified-platform/container/pkg/dev"
-	"github.com/unified-platform/container/pkg/diagnostics"
-	"github.com/unified-platform/container/pkg/doctor"
-	"github.com/unified-platform/container/pkg/governance"
-	"github.com/unified-platform/container/pkg/local"
-	"github.com/unified-platform/container/pkg/mcp"
-	"github.com/unified-platform/container/pkg/opmem"
-	"github.com/unified-platform/container/pkg/rollout"
-	"github.com/unified-platform/container/pkg/runtime"
-	"github.com/unified-platform/container/pkg/secret"
-	"github.com/unified-platform/container/pkg/security"
-	"github.com/unified-platform/container/pkg/synthesizer"
-	"github.com/unified-platform/container/pkg/transpile"
-	"github.com/unified-platform/container/pkg/tunnel"
+	"github.com/sensi012/skipper/pkg/bootstrapper"
+	"github.com/sensi012/skipper/pkg/build"
+	"github.com/sensi012/skipper/pkg/cluster"
+	"github.com/sensi012/skipper/pkg/config"
+	"github.com/sensi012/skipper/pkg/dev"
+	"github.com/sensi012/skipper/pkg/diagnostics"
+	"github.com/sensi012/skipper/pkg/doctor"
+	"github.com/sensi012/skipper/pkg/gitops"
+	"github.com/sensi012/skipper/pkg/governance"
+	"github.com/sensi012/skipper/pkg/local"
+	"github.com/sensi012/skipper/pkg/mcp"
+	"github.com/sensi012/skipper/pkg/opmem"
+	"github.com/sensi012/skipper/pkg/rollout"
+	"github.com/sensi012/skipper/pkg/runtime"
+	"github.com/sensi012/skipper/pkg/secret"
+	"github.com/sensi012/skipper/pkg/security"
+	"github.com/sensi012/skipper/pkg/synthesizer"
+	"github.com/sensi012/skipper/pkg/transpile"
+	"github.com/sensi012/skipper/pkg/tunnel"
+	"github.com/sensi012/skipper/schemas"
 	"gopkg.in/yaml.v3"
 )
 
@@ -37,12 +41,14 @@ var (
 	outputFormat  string
 )
 
-func main() {
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:     "skipper",
-		Short:   "Skipper: Unified Container & Kubernetes Runtime Abstraction CLI",
-		Long:    "A developer-first CLI unifying container build, local execution, production deployment, and deterministic diagnostics.",
-		Version: version,
+		Use:           "skipper",
+		Short:         "Skipper: Unified Container & Kubernetes Runtime Abstraction CLI",
+		Long:          "A developer-first CLI unifying container build, local execution, production deployment, and deterministic diagnostics.",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&targetRuntime, "runtime", "r", "docker", "Target runtime: 'docker' (local) or 'kubernetes' (remote)")
@@ -72,7 +78,17 @@ func main() {
 	rootCmd.AddCommand(newImportCmd())
 	rootCmd.AddCommand(newMCPCmd())
 	rootCmd.AddCommand(newExplainCmd())
+	rootCmd.AddCommand(newSBOMCmd())
+	rootCmd.AddCommand(newSignCmd())
+	rootCmd.AddCommand(newObserveCmd())
+	rootCmd.AddCommand(newGitOpsCmd())
+	rootCmd.AddCommand(newContextCmd())
 
+	return rootCmd
+}
+
+func main() {
+	rootCmd := newRootCmd()
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -250,13 +266,14 @@ func newManifestCmd() *cobra.Command {
 			}
 
 			manifestYaml := bundle.FullYaml()
+			out := cmd.OutOrStdout()
 			if outputFile != "" {
 				if err := os.WriteFile(outputFile, []byte(manifestYaml), 0644); err != nil {
 					return fmt.Errorf("failed to write manifest file: %w", err)
 				}
-				fmt.Printf("==> Synthesized production manifests written to: %s\n", outputFile)
+				fmt.Fprintf(out, "==> Synthesized production manifests written to: %s\n", outputFile)
 			} else {
-				fmt.Println(manifestYaml)
+				fmt.Fprintln(out, manifestYaml)
 			}
 			return nil
 		},
@@ -513,23 +530,24 @@ func newPolicyCmd() *cobra.Command {
 				return err
 			}
 
+			out := cmd.OutOrStdout()
 			if outputFormat == "json" {
 				if violations == nil {
 					violations = []governance.PolicyViolation{}
 				}
-				enc := json.NewEncoder(os.Stdout)
+				enc := json.NewEncoder(out)
 				enc.SetIndent("", "  ")
 				return enc.Encode(violations)
 			}
 
 			if len(violations) == 0 {
-				fmt.Println("[POLICY AUDIT PASSED] AppSpec complies with all enterprise platform rules.")
+				fmt.Fprintln(out, "[POLICY AUDIT PASSED] AppSpec complies with all enterprise platform rules.")
 				return nil
 			}
 
-			fmt.Printf("=== POLICY AUDIT FINDINGS: %d RULE(S) TRIGGERED ===\n\n", len(violations))
+			fmt.Fprintf(out, "=== POLICY AUDIT FINDINGS: %d RULE(S) TRIGGERED ===\n\n", len(violations))
 			for i, v := range violations {
-				fmt.Printf("[%d] [%s] %s: %s\n", i+1, v.Severity, v.RuleName, v.Message)
+				fmt.Fprintf(out, "[%d] [%s] %s: %s\n", i+1, v.Severity, v.RuleName, v.Message)
 			}
 			return nil
 		},
@@ -537,9 +555,18 @@ func newPolicyCmd() *cobra.Command {
 }
 
 func newDebugCmd() *cobra.Command {
-	return &cobra.Command{
+	var (
+		ephemeral       bool
+		debugImage      string
+		targetContainer string
+		copyPod         bool
+		shareProcesses  bool
+		dryRun          bool
+	)
+
+	cmd := &cobra.Command{
 		Use:   "debug [name]",
-		Short: "Attach an interactive debugging session with retained context",
+		Short: "Attach an interactive or ephemeral debugging sandbox with retained context",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			spec, err := loadSpec()
 			workloadName := ""
@@ -553,26 +580,62 @@ func newDebugCmd() *cobra.Command {
 				return fmt.Errorf("workload name required")
 			}
 
-			engine := getRuntimeAdapter()
+			out := cmd.OutOrStdout()
 			ctx := context.Background()
-			fmt.Printf("==> Spawning ephemeral debug session on '%s' via [%s]...\n", workloadName, engine.Name())
+
+			if ephemeral {
+				ledger, _ := opmem.NewOperationalMemoryLedger("")
+				launcher := runtime.NewEphemeralSandboxLauncher(ledger)
+				res, err := launcher.Launch(ctx, runtime.EphemeralSandboxOptions{
+					WorkloadName:    workloadName,
+					Namespace:       namespace,
+					Runtime:         targetRuntime,
+					DebugImage:      debugImage,
+					TargetContainer: targetContainer,
+					CopyPod:         copyPod,
+					ShareProcesses:  shareProcesses,
+					DryRun:          dryRun,
+					Operator:        os.Getenv("USERNAME"),
+				}, os.Stdin, out, cmd.ErrOrStderr())
+				if err != nil {
+					return err
+				}
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(res)
+				}
+				mode := "LIVE"
+				if res.DryRun {
+					mode = "DRY-RUN"
+				}
+				fmt.Fprintf(out, "==> Ephemeral debug sandbox [%s] (Session: %s)\n", mode, res.SessionID)
+				fmt.Fprintf(out, "    Runtime:     %s\n", res.Runtime)
+				fmt.Fprintf(out, "    Target:      %s\n", res.Target)
+				fmt.Fprintf(out, "    Debug Image: %s\n", res.DebugImage)
+				fmt.Fprintf(out, "    Command:     %s\n", strings.Join(res.Command, " "))
+				return nil
+			}
+
+			engine := getRuntimeAdapter()
+			fmt.Fprintf(out, "==> Spawning ephemeral debug session on '%s' via [%s]...\n", workloadName, engine.Name())
 
 			startTime := time.Now()
 			code, err := engine.Debug(ctx, runtime.DebugOptions{
 				WorkloadName: workloadName,
-			}, os.Stdin, os.Stdout, os.Stderr)
+			}, os.Stdin, out, cmd.ErrOrStderr())
 
 			endTime := time.Now()
 
 			// Retain debug session in operational memory
 			if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
 				_ = ledger.RecordDebugSession(&opmem.DebugSessionRecord{
-					SessionID:    fmt.Sprintf("dbg-%d", startTime.Unix()),
-					StartedAt:    startTime,
-					EndedAt:      endTime,
-					Operator:     os.Getenv("USERNAME"),
-					WorkloadName: workloadName,
-					ExitCode:     code,
+					SessionID:         fmt.Sprintf("dbg-%d", startTime.Unix()),
+					StartedAt:         startTime,
+					EndedAt:           endTime,
+					Operator:          os.Getenv("USERNAME"),
+					WorkloadName:      workloadName,
+					ExitCode:          code,
 					ResolutionSummary: fmt.Sprintf("Debug session on %s concluded with exit code %d", workloadName, code),
 				})
 
@@ -585,10 +648,18 @@ func newDebugCmd() *cobra.Command {
 				})
 			}
 
-			fmt.Printf("\n[Debug session preserved in Operational Memory with exit code %d]\n", code)
+			fmt.Fprintf(out, "\n[Debug session preserved in Operational Memory with exit code %d]\n", code)
 			return err
 		},
 	}
+
+	cmd.Flags().BoolVar(&ephemeral, "ephemeral", false, "Launch an isolated ephemeral debug sandbox container")
+	cmd.Flags().StringVar(&debugImage, "debug-image", runtime.DefaultDebugImage, "Container image for ephemeral debug sandbox")
+	cmd.Flags().StringVar(&targetContainer, "target-container", "", "Target container name inside pod for process namespace sharing")
+	cmd.Flags().BoolVar(&copyPod, "copy-pod", false, "Debug a copy of the target pod (Kubernetes only)")
+	cmd.Flags().BoolVar(&shareProcesses, "share-processes", true, "Share process namespace with target container")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print resolved sandbox command without executing")
+	return cmd
 }
 
 func newTimeTravelCmd() *cobra.Command {
@@ -739,40 +810,53 @@ func newLocalCmd() *cobra.Command {
 	return localCmd
 }
 
+func renderDoctorReport(out io.Writer, report *doctor.DoctorReport, format string) error {
+	if format == "json" {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(report); err != nil {
+			return err
+		}
+		if !report.Passed {
+			return fmt.Errorf("doctor audit failed; please resolve blocking issues above")
+		}
+		return nil
+	}
+
+	fmt.Fprintln(out, "==> Running Skipper environment health audit...")
+
+	for _, check := range report.Checks {
+		symbol := "[✓]"
+		if check.Status == doctor.StatusWarn {
+			symbol = "[!]"
+		} else if check.Status == doctor.StatusFail {
+			symbol = "[✗]"
+		}
+		fmt.Fprintf(out, "  %s %-30s : %s\n", symbol, check.Name, check.Message)
+		if check.Remediation != "" {
+			fmt.Fprintf(out, "      -> Fix: %s\n", check.Remediation)
+		}
+	}
+
+	if !report.Passed {
+		return fmt.Errorf("doctor audit failed; please resolve blocking issues above")
+	}
+	fmt.Fprintln(out, "==> All critical prerequisites satisfied!")
+	return nil
+}
+
+var runDoctor = func(ctx context.Context) *doctor.DoctorReport {
+	engine := doctor.NewDoctorEngine()
+	return engine.RunDiagnostics(ctx)
+}
+
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Check local environment prerequisites and port collisions",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			engine := doctor.NewDoctorEngine()
-			report := engine.RunDiagnostics(context.Background())
-
-			if outputFormat == "json" {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(report)
-			}
-
-			fmt.Println("==> Running Skipper environment health audit...")
-
-			for _, check := range report.Checks {
-				symbol := "[✓]"
-				if check.Status == doctor.StatusWarn {
-					symbol = "[!]"
-				} else if check.Status == doctor.StatusFail {
-					symbol = "[✗]"
-				}
-				fmt.Printf("  %s %-30s : %s\n", symbol, check.Name, check.Message)
-				if check.Remediation != "" {
-					fmt.Printf("      -> Fix: %s\n", check.Remediation)
-				}
-			}
-
-			if !report.Passed {
-				return fmt.Errorf("doctor audit failed; please resolve blocking issues above")
-			}
-			fmt.Println("==> All critical prerequisites satisfied!")
-			return nil
+			report := runDoctor(context.Background())
+			return renderDoctorReport(cmd.OutOrStdout(), report, outputFormat)
 		},
 	}
 }
@@ -806,7 +890,7 @@ func newInitCmd() *cobra.Command {
 		},
 	}
 
-	initCmd.Flags().StringVarP(&initName, "name", "n", "", "Workload name (default: current directory name)")
+	initCmd.Flags().StringVar(&initName, "name", "", "Workload name (default: current directory name)")
 	initCmd.Flags().StringVarP(&initTeam, "team", "t", "platform", "Owning team for governance attribution")
 	initCmd.Flags().IntVarP(&initPort, "port", "p", 0, "Primary service port (auto-detected if omitted)")
 	return initCmd
@@ -839,7 +923,6 @@ func newDevCmd() *cobra.Command {
 }
 
 func newPortForwardCmd() *cobra.Command {
-	var pfNamespace string
 	pfCmd := &cobra.Command{
 		Use:   "port-forward [workload] [localPort:remotePort]",
 		Short: "Forward local port to a remote Kubernetes deployment",
@@ -853,7 +936,7 @@ func newPortForwardCmd() *cobra.Command {
 
 			forwarder := tunnel.NewPortForwarder()
 			return forwarder.Forward(context.Background(), tunnel.PortForwardOptions{
-				Namespace:    pfNamespace,
+				Namespace:    namespace,
 				WorkloadName: workload,
 				LocalPort:    localPort,
 				RemotePort:   remotePort,
@@ -861,7 +944,6 @@ func newPortForwardCmd() *cobra.Command {
 		},
 	}
 
-	pfCmd.Flags().StringVarP(&pfNamespace, "namespace", "n", "default", "Kubernetes namespace")
 	return pfCmd
 }
 
@@ -887,7 +969,7 @@ func newSecretCmd() *cobra.Command {
 			if err := store.Set(parts[0], parts[1]); err != nil {
 				return err
 			}
-			fmt.Printf("==> Secret '%s' saved successfully.\n", parts[0])
+			fmt.Fprintf(cmd.OutOrStdout(), "==> Secret '%s' saved successfully.\n", parts[0])
 			return nil
 		},
 	}
@@ -905,7 +987,7 @@ func newSecretCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("%s=%s\n", args[0], val)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s=%s\n", args[0], val)
 			return nil
 		},
 	}
@@ -922,14 +1004,166 @@ func newSecretCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Println(manifest)
+			fmt.Fprintln(cmd.OutOrStdout(), manifest)
 			return nil
 		},
 	}
 
+	var (
+		syncProvider       string
+		syncVaultAddr      string
+		syncVaultToken     string
+		syncVaultMount     string
+		syncVaultPath      string
+		syncExternalSecret bool
+		syncDirection      string
+		syncName           string
+		syncKeys           []string
+		syncAWSRegion      string
+		syncGCPProject     string
+	)
+
+	syncCmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Sync secrets with HashiCorp Vault or generate ExternalSecrets manifests (Vault/AWS/GCP)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			dir := strings.ToLower(strings.TrimSpace(syncDirection))
+			if syncExternalSecret {
+				dir = "manifest"
+			}
+			if dir == "" {
+				dir = "manifest"
+			}
+
+			switch dir {
+			case "manifest":
+				keys := syncKeys
+				if len(keys) == 0 {
+					if store, err := secret.NewSecretStore(""); err == nil {
+						if existing, err := store.List(); err == nil {
+							for k := range existing {
+								keys = append(keys, k)
+							}
+						}
+					}
+				}
+				if len(keys) == 0 {
+					keys = []string{"APP_SECRET"}
+				}
+
+				opts := secret.ExternalSecretOptions{
+					Name:         syncName,
+					Namespace:    namespace,
+					Provider:     secret.ExternalSecretProvider(strings.ToLower(syncProvider)),
+					RemotePath:   syncVaultPath,
+					VaultAddr:    syncVaultAddr,
+					VaultMount:   syncVaultMount,
+					AWSRegion:    syncAWSRegion,
+					GCPProjectID: syncGCPProject,
+				}
+				manifest, err := secret.GenerateExternalSecretManifest(opts, keys)
+				if err != nil {
+					return err
+				}
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]interface{}{
+						"provider":  opts.Provider,
+						"namespace": opts.Namespace,
+						"name":      opts.Name,
+						"keys":      keys,
+						"manifest":  manifest,
+					})
+				}
+				fmt.Fprintln(out, manifest)
+				return nil
+
+			case "push":
+				store, err := secret.NewSecretStore("")
+				if err != nil {
+					return err
+				}
+				secrets, err := store.List()
+				if err != nil {
+					return err
+				}
+				client, err := secret.NewVaultSyncClient(syncVaultAddr, syncVaultToken)
+				if err != nil {
+					return err
+				}
+				if err := client.Push(context.Background(), syncVaultMount, syncVaultPath, secrets); err != nil {
+					return err
+				}
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]interface{}{
+						"direction": "push",
+						"vaultAddr": syncVaultAddr,
+						"path":      syncVaultPath,
+						"count":     len(secrets),
+						"status":    "SYNCED",
+					})
+				}
+				fmt.Fprintf(out, "==> Pushed %d secret(s) to Vault (%s/%s).\n", len(secrets), syncVaultMount, syncVaultPath)
+				return nil
+
+			case "pull":
+				client, err := secret.NewVaultSyncClient(syncVaultAddr, syncVaultToken)
+				if err != nil {
+					return err
+				}
+				pulled, err := client.Pull(context.Background(), syncVaultMount, syncVaultPath)
+				if err != nil {
+					return err
+				}
+				store, err := secret.NewSecretStore("")
+				if err != nil {
+					return err
+				}
+				for k, v := range pulled {
+					if err := store.Set(k, v); err != nil {
+						return err
+					}
+				}
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]interface{}{
+						"direction": "pull",
+						"vaultAddr": syncVaultAddr,
+						"path":      syncVaultPath,
+						"count":     len(pulled),
+						"status":    "SYNCED",
+					})
+				}
+				fmt.Fprintf(out, "==> Pulled %d secret(s) from Vault (%s/%s).\n", len(pulled), syncVaultMount, syncVaultPath)
+				return nil
+
+			default:
+				return fmt.Errorf("unsupported sync direction %q (expected push, pull, or manifest)", syncDirection)
+			}
+		},
+	}
+
+	syncCmd.Flags().StringVar(&syncProvider, "provider", "vault", "Secret backend provider: vault, aws, or gcp")
+	syncCmd.Flags().StringVar(&syncVaultAddr, "vault-addr", os.Getenv("VAULT_ADDR"), "HashiCorp Vault server URL")
+	syncCmd.Flags().StringVar(&syncVaultToken, "vault-token", os.Getenv("VAULT_TOKEN"), "HashiCorp Vault auth token")
+	syncCmd.Flags().StringVar(&syncVaultMount, "vault-mount", "secret", "Vault KV v2 mount path")
+	syncCmd.Flags().StringVar(&syncVaultPath, "vault-path", "skipper/app", "Remote secret path in Vault/AWS/GCP")
+	syncCmd.Flags().BoolVar(&syncExternalSecret, "external-secret", false, "Output ExternalSecrets Operator SecretStore + ExternalSecret YAML")
+	syncCmd.Flags().StringVar(&syncDirection, "direction", "manifest", "Sync mode: push, pull, or manifest")
+	syncCmd.Flags().StringVar(&syncName, "name", "skipper-secrets", "ExternalSecret resource name")
+	syncCmd.Flags().StringSliceVar(&syncKeys, "keys", nil, "Secret keys to include in ExternalSecret manifest")
+	syncCmd.Flags().StringVar(&syncAWSRegion, "aws-region", "us-east-1", "AWS Secrets Manager region (for --provider aws)")
+	syncCmd.Flags().StringVar(&syncGCPProject, "gcp-project", "", "GCP Project ID (for --provider gcp)")
+
 	secretCmd.AddCommand(setCmd)
 	secretCmd.AddCommand(getCmd)
 	secretCmd.AddCommand(exportCmd)
+	secretCmd.AddCommand(syncCmd)
 	return secretCmd
 }
 
@@ -972,7 +1206,7 @@ func newImportCmd() *cobra.Command {
 			if err := os.WriteFile(targetFile, outData, 0644); err != nil {
 				return err
 			}
-			fmt.Printf("==> Successfully transpiled '%s' into '%s' (Service: %s)!\n", file, targetFile, spec.Name)
+			fmt.Fprintf(cmd.OutOrStdout(), "==> Successfully transpiled '%s' into '%s' (Service: %s)!\n", file, targetFile, spec.Name)
 			return nil
 		},
 	}
@@ -992,19 +1226,95 @@ func newMCPCmd() *cobra.Command {
 	}
 }
 
+type explainIntentModel struct {
+	Description string   `json:"description"`
+	Version     string   `json:"version"`
+	Name        string   `json:"name"`
+	Types       []string `json:"types"`
+	Endpoints   string   `json:"endpoints"`
+	Resources   string   `json:"resources"`
+	Security    string   `json:"security"`
+}
+
+type explainPlaybookEntry struct {
+	Task    string `json:"task"`
+	Command string `json:"command"`
+}
+
+type explainSpec struct {
+	Title           string                 `json:"title"`
+	Version         string                 `json:"version"`
+	IntentModel     explainIntentModel     `json:"intentModel"`
+	Playbook        []explainPlaybookEntry `json:"playbook"`
+	MCPTools        []string               `json:"mcpTools"`
+	RemediationLoop []string               `json:"remediationLoop"`
+}
+
 func newExplainCmd() *cobra.Command {
 	var showRawSchema bool
 	cmd := &cobra.Command{
 		Use:   "explain",
 		Short: "Output declarative schema and instruction grammar for AI agent consumption",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
 			if showRawSchema {
-				schemaData, err := os.ReadFile("schemas/skipper.schema.json")
-				if err != nil {
-					return fmt.Errorf("unable to load schemas/skipper.schema.json: %w", err)
-				}
-				fmt.Println(string(schemaData))
+				fmt.Fprintln(out, strings.TrimSpace(string(schemas.SkipperSchemaJSON)))
 				return nil
+			}
+
+			if outputFormat == "json" {
+				payload := explainSpec{
+					Title:   "Skipper AI Agent Operational Specification",
+					Version: version,
+					IntentModel: explainIntentModel{
+						Description: "Skipper translates a declarative 'skipper.yaml' into standard OCI containers and hardened Kubernetes manifests.",
+						Version:     "v1alpha1",
+						Name:        "string (alphanumeric lowercase, dashes)",
+						Types:       []string{"service", "worker", "job"},
+						Endpoints:   "list of {name, port, protocol, public}",
+						Resources:   "{cpu: {request, limit}, memory: {request, limit}}",
+						Security:    "{runAsNonRoot: true, readOnlyRootFilesystem: bool}",
+					},
+					Playbook: []explainPlaybookEntry{
+						{Task: "Check Workstation Status", Command: "skipper doctor -f json"},
+						{Task: "Audit Policies Before Deploy", Command: "skipper policy-check -f json"},
+						{Task: "Compile Kubernetes Manifests", Command: "skipper manifest"},
+						{Task: "Diagnose Failing Workloads", Command: "skipper diagnose <name> -f json"},
+						{Task: "Reclaim Cloud Cost / Rightsize", Command: "skipper rightsize -f json"},
+						{Task: "Manage Encrypted Credentials", Command: "skipper secret set KEY=VAL / skipper secret export"},
+						{Task: "Sync Secrets (Vault / ExternalSecrets)", Command: "skipper secret sync --provider vault --external-secret / --direction push|pull"},
+						{Task: "Migrate Docker Compose", Command: "skipper import compose [path]"},
+						{Task: "Generate SBOM (CycloneDX / SPDX)", Command: "skipper sbom --target . --sbom-format cyclonedx -f json"},
+						{Task: "Sign or Verify OCI Images (Cosign)", Command: "skipper sign --image <ref> [--verify] [--dry-run] -f json"},
+						{Task: "Launch Ephemeral Debug Sandbox", Command: "skipper debug <workload> --ephemeral [--copy-pod] [--share-processes] [--dry-run]"},
+						{Task: "Observe SLO Health Gates & OTel Manifests", Command: "skipper observe [workload] --prometheus-url <url> / --otel-manifest -f json"},
+						{Task: "Export GitOps Bundle (ArgoCD / FluxCD)", Command: "skipper gitops export --engine argocd|flux --repo <url> --env prod -o <dir>"},
+						{Task: "Manage Fleet Contexts & Detect Drift", Command: "skipper context [list|current|use <name>|drift] -f json"},
+					},
+					MCPTools: []string{
+						"skipper_doctor",
+						"skipper_init",
+						"skipper_policy_check",
+						"skipper_manifest",
+						"skipper_diagnose",
+						"skipper_rightsize",
+						"skipper_rollback",
+						"skipper_investigate_incident",
+						"skipper_sbom",
+						"skipper_drift_check",
+					},
+					RemediationLoop: []string{
+						"Call 'skipper diagnose <workload> -f json' or MCP 'skipper_investigate_incident'",
+						"Parse 'detectorName', 'rootCause', and 'remediationCmd'",
+						"Execute 'remediationCmd', attach 'skipper debug <workload> --ephemeral', or trigger MCP 'skipper_rollback'",
+						"Verify drift via 'skipper context drift -f json' and SLOs via 'skipper observe <workload> -f json'",
+						"Re-run 'skipper deploy' or 'skipper gitops export'",
+					},
+				}
+				enc := json.NewEncoder(out)
+				enc.SetEscapeHTML(false)
+				enc.SetIndent("", "  ")
+				return enc.Encode(payload)
 			}
 
 			// Clean, high-density AI instruction grammar
@@ -1026,20 +1336,514 @@ Skipper translates a declarative 'skipper.yaml' into standard OCI containers and
 - Diagnose Failing Workloads: run 'skipper diagnose <name> -f json'
 - Reclaim Cloud Cost / Rightsize: run 'skipper rightsize -f json'
 - Manage Encrypted Credentials: run 'skipper secret set KEY=VAL' / 'skipper secret export'
+- Sync Secrets (Vault / ExternalSecrets): run 'skipper secret sync --provider vault --external-secret' or '--direction push|pull'
 - Migrate Docker Compose: run 'skipper import compose [path]'
+- Generate SBOM (CycloneDX / SPDX): run 'skipper sbom --target . --sbom-format cyclonedx -f json'
+- Sign or Verify OCI Images (Cosign): run 'skipper sign --image <ref> [--verify] [--dry-run] -f json'
+- Launch Ephemeral Debug Sandbox: run 'skipper debug <workload> --ephemeral [--copy-pod] [--share-processes] [--dry-run]'
+- Observe SLO Health Gates & OTel Manifests: run 'skipper observe [workload] --prometheus-url <url>' or 'skipper observe --otel-manifest'
+- Export GitOps Bundle (ArgoCD / FluxCD): run 'skipper gitops export --engine argocd|flux --repo <url> --env prod -o <dir>'
+- Manage Fleet Contexts & Detect Drift: run 'skipper context [list|current|use <name>|drift] -f json'
 
-## 3. Self-Healing & Remediation Loop
+## 3. Model Context Protocol (MCP) Tools ('skipper mcp')
+10 native JSON-RPC tools exposed over stdio:
+- skipper_doctor
+- skipper_init
+- skipper_policy_check
+- skipper_manifest
+- skipper_diagnose
+- skipper_rightsize
+- skipper_rollback
+- skipper_investigate_incident
+- skipper_sbom
+- skipper_drift_check
+
+## 4. Self-Healing & Remediation Loop
 When diagnosing a failing workload:
-1. Call 'skipper diagnose <workload> -f json'
+1. Call 'skipper diagnose <workload> -f json' or MCP 'skipper_investigate_incident'
 2. Parse 'detectorName', 'rootCause', and 'remediationCmd'
-3. Execute 'remediationCmd' or adjust memory/cpu in 'skipper.yaml'
-4. Re-run 'skipper deploy' or 'skipper up'
+3. Execute 'remediationCmd', attach 'skipper debug <workload> --ephemeral', or trigger MCP 'skipper_rollback'
+4. Verify drift via 'skipper context drift -f json' and SLOs via 'skipper observe <workload> -f json'
+5. Re-run 'skipper deploy' or 'skipper gitops export'
 `
-			fmt.Print(grammar)
+			fmt.Fprint(out, grammar)
 			return nil
 		},
 	}
 
 	cmd.Flags().BoolVar(&showRawSchema, "schema", false, "Output formal JSON Schema Draft 2020-12")
 	return cmd
+}
+
+func newSBOMCmd() *cobra.Command {
+	var (
+		target     string
+		sbomFormat string
+		outputPath string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "sbom",
+		Short: "Generate a CycloneDX 1.5 or SPDX 2.3 Software Bill of Materials (SBOM)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && target == "." {
+				target = args[0]
+			}
+			parsedFormat, err := security.ParseSBOMFormat(sbomFormat)
+			if err != nil {
+				return err
+			}
+
+			gen := security.NewSBOMGenerator()
+			report, err := gen.Generate(context.Background(), security.SBOMOptions{
+				Target:     target,
+				Format:     parsedFormat,
+				OutputPath: outputPath,
+			})
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(map[string]interface{}{
+					"format":         report.Format,
+					"target":         report.Target,
+					"tool":           report.Tool,
+					"componentCount": report.ComponentCount,
+					"outputPath":     report.OutputPath,
+					"document":       json.RawMessage(report.Document),
+				})
+			}
+
+			if outputPath != "" {
+				fmt.Fprintf(out, "==> Generated %s SBOM (%d components, tool: %s) -> %s\n",
+					report.Format, report.ComponentCount, report.Tool, report.OutputPath)
+				return nil
+			}
+			fmt.Fprintln(out, string(report.Document))
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&target, "target", ".", "Target directory or OCI image reference")
+	cmd.Flags().StringVar(&sbomFormat, "sbom-format", "cyclonedx", "SBOM format: cyclonedx or spdx")
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Write SBOM JSON to file path")
+	return cmd
+}
+
+func newSignCmd() *cobra.Command {
+	var (
+		image      string
+		keyRef     string
+		verify     bool
+		dryRun     bool
+		certID     string
+		certIssuer string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "sign [image]",
+		Short: "Sign or verify OCI container images using Cosign (keyed or keyless OIDC)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			img := strings.TrimSpace(image)
+			if img == "" && len(args) > 0 {
+				img = strings.TrimSpace(args[0])
+			}
+			if img == "" {
+				if spec, err := loadSpec(); err == nil {
+					img = spec.Image
+					if img == "" && spec.Name != "" {
+						img = fmt.Sprintf("%s:latest", spec.Name)
+					}
+				}
+			}
+			if img == "" {
+				return fmt.Errorf("image reference required (pass --image or positional argument)")
+			}
+
+			out := cmd.OutOrStdout()
+			signer := security.NewImageSigner()
+			ctx := context.Background()
+
+			if verify {
+				res, err := signer.Verify(ctx, security.VerifyOptions{
+					Image:               img,
+					KeyRef:              keyRef,
+					CertificateIdentity: certID,
+					CertificateIssuer:   certIssuer,
+					DryRun:              dryRun,
+				})
+				if err != nil {
+					return err
+				}
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(res)
+				}
+				fmt.Fprintf(out, "==> Cosign verify [%s] (dry-run=%v, verified=%v)\n    Command: %s\n",
+					res.Image, res.DryRun, res.Verified, strings.Join(res.Command, " "))
+				return nil
+			}
+
+			res, err := signer.Sign(ctx, security.SignOptions{
+				Image:  img,
+				KeyRef: keyRef,
+				DryRun: dryRun,
+				Yes:    true,
+			})
+			if err != nil {
+				return err
+			}
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(res)
+			}
+			fmt.Fprintf(out, "==> Cosign sign [%s] (keyless=%v, dry-run=%v, signed=%v)\n    Command: %s\n",
+				res.Image, res.Keyless, res.DryRun, res.Signed, strings.Join(res.Command, " "))
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&image, "image", "", "OCI image reference to sign or verify")
+	cmd.Flags().StringVar(&keyRef, "key", "", "Path or KMS URI to signing/verification key (keyless OIDC if omitted)")
+	cmd.Flags().BoolVar(&verify, "verify", false, "Verify an existing image signature instead of signing")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print resolved Cosign command without executing")
+	cmd.Flags().StringVar(&certID, "certificate-identity", "", "Expected OIDC certificate identity (for keyless verify)")
+	cmd.Flags().StringVar(&certIssuer, "certificate-issuer", "", "Expected OIDC certificate issuer (for keyless verify)")
+	return cmd
+}
+
+func newObserveCmd() *cobra.Command {
+	var (
+		promURL      string
+		maxErrorRate float64
+		maxP95Ms     float64
+		maxSat       float64
+		otelManifest bool
+		otlpEndpoint string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "observe [workload]",
+		Short: "Evaluate Prometheus/OTel canary health gates or synthesize OpenTelemetry manifests",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+
+			if otelManifest {
+				spec, err := loadSpec()
+				if err != nil {
+					return err
+				}
+				manifest, err := synthesizer.SynthesizeOTelConfig(spec, synthesizer.OTelOptions{
+					Namespace:    namespace,
+					OTLPEndpoint: otlpEndpoint,
+				})
+				if err != nil {
+					return err
+				}
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]interface{}{
+						"workload":  spec.Name,
+						"namespace": namespace,
+						"manifest":  manifest,
+					})
+				}
+				fmt.Fprintln(out, manifest)
+				return nil
+			}
+
+			workloadName := ""
+			if len(args) > 0 {
+				workloadName = args[0]
+			} else if spec, err := loadSpec(); err == nil {
+				workloadName = spec.Name
+			}
+			if workloadName == "" {
+				return fmt.Errorf("workload name required (pass positional arg or provide skipper.yaml)")
+			}
+
+			gate := rollout.NewPrometheusHealthGate(promURL, rollout.GateThresholds{
+				MaxErrorRate:    maxErrorRate,
+				MaxP95LatencyMs: maxP95Ms,
+				MaxSaturation:   maxSat,
+			})
+			report, err := gate.Evaluate(context.Background(), workloadName)
+			if err != nil {
+				return err
+			}
+
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				if encErr := enc.Encode(report); encErr != nil {
+					return encErr
+				}
+				if !report.Healthy {
+					return fmt.Errorf("health gate failed: %s", strings.Join(report.Violations, "; "))
+				}
+				return nil
+			}
+
+			fmt.Fprintf(out, "=== OBSERVABILITY HEALTH GATE: %s (%s) ===\n", report.Workload, report.Endpoint)
+			for _, m := range report.Metrics {
+				mark := "[✓]"
+				if !m.Healthy {
+					mark = "[✗]"
+				}
+				fmt.Fprintf(out, "  %s %-18s : %.4f %s (threshold: %.4f)\n", mark, m.Name, m.Value, m.Unit, m.Threshold)
+			}
+			if !report.Healthy {
+				return fmt.Errorf("health gate failed: %s", strings.Join(report.Violations, "; "))
+			}
+			fmt.Fprintln(out, "==> All SLO health gates passed!")
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&promURL, "prometheus-url", "http://localhost:9090", "Prometheus/OTel HTTP query endpoint")
+	cmd.Flags().Float64Var(&maxErrorRate, "max-error-rate", 0.01, "Maximum allowed 5xx error ratio (e.g. 0.01 = 1%)")
+	cmd.Flags().Float64Var(&maxP95Ms, "max-p95-ms", 500.0, "Maximum allowed P95 latency in milliseconds")
+	cmd.Flags().Float64Var(&maxSat, "max-saturation", 0.85, "Maximum allowed CPU/memory saturation ratio")
+	cmd.Flags().BoolVar(&otelManifest, "otel-manifest", false, "Synthesize OpenTelemetry env/annotations and Prometheus ServiceMonitor YAML")
+	cmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", "http://otel-collector:4317", "OTLP exporter endpoint for --otel-manifest")
+	return cmd
+}
+
+func newGitOpsCmd() *cobra.Command {
+	gitopsCmd := &cobra.Command{
+		Use:   "gitops",
+		Short: "Export declarative GitOps bundles for ArgoCD and FluxCD",
+	}
+
+	var (
+		engine     string
+		repoURL    string
+		branch     string
+		envName    string
+		targetPath string
+		outputDir  string
+	)
+
+	exportCmd := &cobra.Command{
+		Use:   "export",
+		Short: "Generate Kustomize base/overlay manifests and ArgoCD/FluxCD sync definitions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			spec, err := loadSpec()
+			if err != nil {
+				return err
+			}
+
+			res, err := gitops.Export(spec, gitops.ExportOptions{
+				Engine:      gitops.Engine(strings.ToLower(engine)),
+				RepoURL:     repoURL,
+				Branch:      branch,
+				TargetPath:  targetPath,
+				Namespace:   namespace,
+				Environment: envName,
+				OutputDir:   outputDir,
+			})
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(res)
+			}
+
+			fmt.Fprintf(out, "==> Exported %s GitOps bundle for '%s' (env: %s, %d files)\n",
+				res.Engine, res.AppName, res.Environment, len(res.Files))
+			for _, f := range res.Files {
+				fmt.Fprintf(out, "  - %s\n", f.Path)
+			}
+			if res.SyncPlan != "" {
+				fmt.Fprintf(out, "\n%s\n", res.SyncPlan)
+			}
+			return nil
+		},
+	}
+
+	exportCmd.Flags().StringVar(&engine, "engine", string(gitops.EngineArgoCD), "GitOps engine: argocd or flux")
+	exportCmd.Flags().StringVar(&repoURL, "repo", "https://github.com/example/gitops-repo.git", "Target GitOps repository URL")
+	exportCmd.Flags().StringVar(&branch, "branch", "main", "Target Git branch")
+	exportCmd.Flags().StringVar(&envName, "env", "prod", "Target environment overlay (e.g. staging, prod)")
+	exportCmd.Flags().StringVar(&targetPath, "target-path", "", "Optional path inside the Git repository")
+	exportCmd.Flags().StringVarP(&outputDir, "output", "o", "", "Output directory to write generated GitOps files")
+
+	gitopsCmd.AddCommand(exportCmd)
+	return gitopsCmd
+}
+
+func newContextCmd() *cobra.Command {
+	contextCmd := &cobra.Command{
+		Use:   "context",
+		Short: "Manage multi-cluster Kubernetes fleet contexts and detect configuration drift",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cm := cluster.NewContextManager()
+			summary, err := cm.FleetStatus(context.Background())
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(summary)
+			}
+			fmt.Fprintf(out, "Current Context: %s (Clusters: %d, Reachable: %d)\n",
+				summary.CurrentContext, summary.TotalClusters, summary.ReachableCount)
+			for _, c := range summary.Contexts {
+				cur := " "
+				if c.Current {
+					cur = "*"
+				}
+				fmt.Fprintf(out, "  %s %-24s cluster=%-20s ns=%-12s reachable=%v\n",
+					cur, c.Name, c.Cluster, c.Namespace, c.Reachable)
+			}
+			return nil
+		},
+	}
+
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all configured Kubernetes contexts",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cm := cluster.NewContextManager()
+			contexts, err := cm.ListContexts(context.Background())
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(contexts)
+			}
+			for _, c := range contexts {
+				cur := " "
+				if c.Current {
+					cur = "*"
+				}
+				fmt.Fprintf(out, "%s %s (cluster: %s, namespace: %s)\n", cur, c.Name, c.Cluster, c.Namespace)
+			}
+			return nil
+		},
+	}
+
+	currentCmd := &cobra.Command{
+		Use:   "current",
+		Short: "Display the active Kubernetes context",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cm := cluster.NewContextManager()
+			cur, err := cm.CurrentContext(context.Background())
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(map[string]string{"currentContext": cur})
+			}
+			fmt.Fprintln(out, cur)
+			return nil
+		},
+	}
+
+	useCmd := &cobra.Command{
+		Use:   "use <name>",
+		Short: "Switch the active Kubernetes context",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cm := cluster.NewContextManager()
+			if err := cm.UseContext(context.Background(), args[0]); err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(map[string]string{"currentContext": args[0], "status": "SWITCHED"})
+			}
+			fmt.Fprintf(out, "==> Switched active context to '%s'.\n", args[0])
+			return nil
+		},
+	}
+
+	var (
+		driftContext string
+		desiredFile  string
+		liveFile     string
+	)
+	driftCmd := &cobra.Command{
+		Use:   "drift",
+		Short: "Detect configuration drift between desired manifests and live cluster state",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			detector := cluster.NewDriftDetector()
+			var report *cluster.DriftReport
+
+			if desiredFile != "" || liveFile != "" {
+				if desiredFile == "" || liveFile == "" {
+					return fmt.Errorf("both --desired and --live must be specified for file-based drift comparison")
+				}
+				dBytes, err := os.ReadFile(desiredFile)
+				if err != nil {
+					return fmt.Errorf("unable to read desired manifest %s: %w", desiredFile, err)
+				}
+				lBytes, err := os.ReadFile(liveFile)
+				if err != nil {
+					return fmt.Errorf("unable to read live manifest %s: %w", liveFile, err)
+				}
+				report, err = detector.DetectDrift(string(dBytes), string(lBytes))
+				if err != nil {
+					return err
+				}
+			} else {
+				spec, err := loadSpec()
+				if err != nil {
+					return err
+				}
+				report, err = detector.DetectClusterDrift(context.Background(), spec, namespace, driftContext)
+				if err != nil {
+					return err
+				}
+			}
+
+			out := cmd.OutOrStdout()
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(report)
+			}
+
+			if !report.HasDrift {
+				fmt.Fprintln(out, "[NO DRIFT DETECTED] Live cluster state matches desired specification.")
+				return nil
+			}
+			fmt.Fprintf(out, "=== DRIFT DETECTED: %d DIFFERENCE(S) ===\n", len(report.Drifts))
+			for i, d := range report.Drifts {
+				fmt.Fprintf(out, "[%d] %s/%s (%s - %s): desired=%q live=%q\n",
+					i+1, d.Kind, d.Name, d.Field, d.DriftType, d.Desired, d.Live)
+			}
+			return nil
+		},
+	}
+	driftCmd.Flags().StringVar(&driftContext, "context", "", "Target kubeconfig context for live drift check")
+	driftCmd.Flags().StringVar(&desiredFile, "desired", "", "Path to desired Kubernetes YAML manifest")
+	driftCmd.Flags().StringVar(&liveFile, "live", "", "Path to live Kubernetes YAML manifest")
+
+	contextCmd.AddCommand(listCmd)
+	contextCmd.AddCommand(currentCmd)
+	contextCmd.AddCommand(useCmd)
+	contextCmd.AddCommand(driftCmd)
+	return contextCmd
 }

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unified-platform/container/pkg/opmem"
+	"github.com/sensi012/skipper/pkg/opmem"
 )
 
 func TestDetectors(t *testing.T) {

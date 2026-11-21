@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/unified-platform/container/pkg/config"
+	"github.com/sensi012/skipper/pkg/config"
 )
 
 // WorkloadRightsizing represents FinOps analysis comparing requested vs actual resource consumption

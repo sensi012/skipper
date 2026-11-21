@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/unified-platform/container/pkg/build"
-	"github.com/unified-platform/container/pkg/config"
-	"github.com/unified-platform/container/pkg/runtime"
+	"github.com/sensi012/skipper/pkg/build"
+	"github.com/sensi012/skipper/pkg/config"
+	"github.com/sensi012/skipper/pkg/runtime"
 )
 
 type DevOptions struct {
@@ -41,6 +41,10 @@ func NewDevServer(opts DevOptions) *DevServer {
 }
 
 func (d *DevServer) Start(ctx context.Context, out io.Writer) error {
+	if out == nil {
+		out = io.Discard
+	}
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
@@ -59,14 +63,30 @@ func (d *DevServer) Start(ctx context.Context, out io.Writer) error {
 	}
 
 	var timer *time.Timer
+	var timerCh <-chan time.Time
+	var pendingFile string
+
 	for {
 		select {
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			_, _ = fmt.Fprintln(out, "\n==> [Skipper Dev] Shutting down...")
-			if d.status != nil {
+			d.mu.Lock()
+			hasStatus := d.status != nil
+			d.mu.Unlock()
+			if hasStatus {
 				_ = d.opts.RuntimeEng.Stop(context.Background(), d.opts.Spec.Name)
 			}
 			return nil
+
+		case <-timerCh:
+			timerCh = nil
+			_, _ = fmt.Fprintf(out, "\n==> [Change Detected: %s] Synchronizing & rebuilding...\n", pendingFile)
+			if err := d.rebuildAndDeploy(ctx, out); err != nil {
+				_, _ = fmt.Fprintf(out, "!! Rebuild failed: %v\n", err)
+			}
 
 		case event, ok := <-watcher.Events:
 			if !ok {
@@ -88,12 +108,9 @@ func (d *DevServer) Start(ctx context.Context, out io.Writer) error {
 				if timer != nil {
 					timer.Stop()
 				}
-				timer = time.AfterFunc(d.opts.Debounce, func() {
-					_, _ = fmt.Fprintf(out, "\n==> [Change Detected: %s] Synchronizing & rebuilding...\n", filepath.Base(event.Name))
-					if err := d.rebuildAndDeploy(ctx, out); err != nil {
-						_, _ = fmt.Fprintf(out, "!! Rebuild failed: %v\n", err)
-					}
-				})
+				pendingFile = filepath.Base(event.Name)
+				timer = time.NewTimer(d.opts.Debounce)
+				timerCh = timer.C
 			}
 
 		case err, ok := <-watcher.Errors:
@@ -129,6 +146,9 @@ func (d *DevServer) rebuildAndDeploy(ctx context.Context, out io.Writer) error {
 func (d *DevServer) addWatchRecursive(watcher *fsnotify.Watcher, root string) error {
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if path == root {
+				return err
+			}
 			return nil
 		}
 		if info.IsDir() {

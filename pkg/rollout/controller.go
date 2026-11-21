@@ -6,8 +6,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/unified-platform/container/pkg/config"
-	"github.com/unified-platform/container/pkg/runtime"
+	"github.com/sensi012/skipper/pkg/config"
+	"github.com/sensi012/skipper/pkg/runtime"
 )
 
 // StrategyType defines the deployment rollout mechanism
@@ -37,9 +37,14 @@ type RolloutStatus struct {
 	Message        string
 }
 
+// HealthCheckFunc evaluates custom external health signals (e.g. Prometheus/OTel metrics)
+// during a progressive rollout step. Returning a non-nil error fails the health gate.
+type HealthCheckFunc func(ctx context.Context, spec *config.AppSpec, cfg RolloutConfig) error
+
 // Controller manages progressive rollout steps and evaluation gates
 type Controller struct {
-	Engine runtime.RuntimeEngine
+	Engine      runtime.RuntimeEngine
+	HealthCheck HealthCheckFunc
 }
 
 // NewController creates a progressive delivery controller
@@ -47,6 +52,11 @@ func NewController(engine runtime.RuntimeEngine) *Controller {
 	return &Controller{
 		Engine: engine,
 	}
+}
+
+// SetHealthCheck attaches a custom health check gate (e.g. PrometheusHealthGate.AsHealthCheck()).
+func (c *Controller) SetHealthCheck(fn HealthCheckFunc) {
+	c.HealthCheck = fn
 }
 
 // ExecuteCanary runs a progressive canary rollout with simulated health evaluation gates
@@ -114,6 +124,12 @@ func (c *Controller) evaluateHealthGate(ctx context.Context, spec *config.AppSpe
 
 	if status.State == "Degraded" || status.State == "Error" {
 		return false, fmt.Errorf("workload status is %s", status.State)
+	}
+
+	if c.HealthCheck != nil {
+		if err := c.HealthCheck(ctx, spec, cfg); err != nil {
+			return false, err
+		}
 	}
 
 	return true, nil

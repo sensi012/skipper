@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://unified-platform.dev/schemas/skipper.v1alpha1.json",
+  "$id": "https://raw.githubusercontent.com/sensi012/skipper/master/schemas/skipper.schema.json",
   "title": "SkipperIntentSpecification",
   "description": "Skipper platform application intent specification (skipper.yaml)",
   "type": "object",

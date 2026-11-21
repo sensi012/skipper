@@ -2,7 +2,7 @@
 # Universal Installer for Linux & macOS (Darwin)
 set -euo pipefail
 
-REPO="unified-platform/container"
+REPO="sensi012/skipper"
 BINARY_NAME="skipper"
 INSTALL_DIR="/usr/local/bin"
 

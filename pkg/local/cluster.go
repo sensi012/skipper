@@ -17,11 +17,22 @@ type ClusterManager interface {
 }
 
 // KindManager manages local Kubernetes clusters via Kind
-type KindManager struct{}
+type KindManager struct {
+	execCommand func(ctx context.Context, name string, arg ...string) *exec.Cmd
+}
 
 // NewKindManager constructs a Kind cluster manager
 func NewKindManager() *KindManager {
-	return &KindManager{}
+	return &KindManager{
+		execCommand: exec.CommandContext,
+	}
+}
+
+func (k *KindManager) command(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	if k.execCommand != nil {
+		return k.execCommand(ctx, name, arg...)
+	}
+	return exec.CommandContext(ctx, name, arg...)
 }
 
 func (k *KindManager) Name() string {
@@ -30,7 +41,12 @@ func (k *KindManager) Name() string {
 
 // Exists checks if the cluster already exists
 func (k *KindManager) Exists(ctx context.Context, clusterName string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "kind", "get", "clusters")
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		return false, nil
+	}
+
+	cmd := k.command(ctx, "kind", "get", "clusters")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("failed to list kind clusters: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -45,18 +61,8 @@ func (k *KindManager) Exists(ctx context.Context, clusterName string) (bool, err
 	return false, nil
 }
 
-// Create provisions a lightweight local development cluster with ingress ready port mappings
-func (k *KindManager) Create(ctx context.Context, clusterName string) error {
-	exists, err := k.Exists(ctx, clusterName)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return fmt.Errorf("local cluster '%s' already exists", clusterName)
-	}
-
-	// Kind cluster configuration with standard port mappings for local ingress (80, 443)
-	configYaml := `kind: Cluster
+func buildKindConfig() string {
+	return `kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
@@ -74,8 +80,27 @@ nodes:
     hostPort: 443
     protocol: TCP
 `
+}
 
-	cmd := exec.CommandContext(ctx, "kind", "create", "cluster", "--name", clusterName, "--config", "-")
+// Create provisions a lightweight local development cluster with ingress ready port mappings
+func (k *KindManager) Create(ctx context.Context, clusterName string) error {
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		return fmt.Errorf("cluster name cannot be empty")
+	}
+
+	exists, err := k.Exists(ctx, clusterName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("local cluster '%s' already exists", clusterName)
+	}
+
+	// Kind cluster configuration with standard port mappings for local ingress (80, 443)
+	configYaml := buildKindConfig()
+
+	cmd := k.command(ctx, "kind", "create", "cluster", "--name", clusterName, "--config", "-")
 	cmd.Stdin = strings.NewReader(configYaml)
 	var outBuf bytes.Buffer
 	cmd.Stdout = &outBuf
@@ -90,7 +115,12 @@ nodes:
 
 // Delete removes the local development cluster
 func (k *KindManager) Delete(ctx context.Context, clusterName string) error {
-	cmd := exec.CommandContext(ctx, "kind", "delete", "cluster", "--name", clusterName)
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		return fmt.Errorf("cluster name cannot be empty")
+	}
+
+	cmd := k.command(ctx, "kind", "delete", "cluster", "--name", clusterName)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("kind delete cluster failed: %w: %s", err, strings.TrimSpace(string(out)))

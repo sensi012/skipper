@@ -1,18 +1,18 @@
 # Contributing Guidelines
 
-Thank you for your interest in contributing to the Unified Developer Platform project!
+Thank you for your interest in contributing to the Skipper project!
 
 ## Development Setup
 
 1. **Prerequisites**:
-   - Go 1.22+
+   - Go 1.25+
    - Docker Engine or Docker Desktop
    - `kubectl` and `kind` (optional for local cluster testing)
 
 2. **Clone and Build**:
    ```bash
-   git clone https://github.com/<your-username>/container.git
-   cd container
+   git clone https://github.com/sensi012/skipper.git
+   cd skipper
    go build -o bin/skipper ./cmd/skipper
    ```
 

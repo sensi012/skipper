@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unified-platform/container/pkg/config"
-	"github.com/unified-platform/container/pkg/diagnostics"
-	"github.com/unified-platform/container/pkg/governance"
-	"github.com/unified-platform/container/pkg/opmem"
-	"github.com/unified-platform/container/pkg/synthesizer"
+	"github.com/sensi012/skipper/pkg/config"
+	"github.com/sensi012/skipper/pkg/diagnostics"
+	"github.com/sensi012/skipper/pkg/governance"
+	"github.com/sensi012/skipper/pkg/opmem"
+	"github.com/sensi012/skipper/pkg/synthesizer"
 )
 
 func TestEndToEndPlatformPipeline(t *testing.T) {

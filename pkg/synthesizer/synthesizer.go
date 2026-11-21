@@ -3,7 +3,7 @@ package synthesizer
 import (
 	"bytes"
 	"fmt"
-	"github.com/unified-platform/container/pkg/config"
+	"github.com/sensi012/skipper/pkg/config"
 )
 
 // ManifestBundle holds all generated production-ready Kubernetes YAML manifests

@@ -25,49 +25,80 @@ type Scanner interface {
 	ScanImage(ctx context.Context, imageName string, out io.Writer) (*VulnerabilityScanResult, error)
 }
 
+// commandRunner executes an external command and returns combined stdout/stderr.
+type commandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
+
 // TrivyScanner implements image vulnerability scanning using Trivy or Docker Scout
-type TrivyScanner struct{}
+type TrivyScanner struct {
+	runCmd commandRunner
+}
 
 // NewTrivyScanner creates a vulnerability scanner
 func NewTrivyScanner() *TrivyScanner {
 	return &TrivyScanner{}
 }
 
+func (t *TrivyScanner) execCmd(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if t.runCmd != nil {
+		return t.runCmd(ctx, name, args...)
+	}
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
 func (t *TrivyScanner) ScanImage(ctx context.Context, imageName string, out io.Writer) (*VulnerabilityScanResult, error) {
+	if strings.TrimSpace(imageName) == "" {
+		return nil, fmt.Errorf("image name must not be empty")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = io.Discard
+	}
+
 	// 1. Check if Trivy is available
-	hasTrivy := exec.CommandContext(ctx, "trivy", "--version").Run() == nil
-	if hasTrivy {
+	_, trivyCheckErr := t.execCmd(ctx, "trivy", "--version")
+	if trivyCheckErr == nil {
 		_, _ = fmt.Fprintf(out, "==> Scanning image '%s' using Trivy security engine...\n", imageName)
-		cmd := exec.CommandContext(ctx, "trivy", "image", "--severity", "CRITICAL,HIGH", "--no-progress", imageName)
-		resBytes, _ := cmd.CombinedOutput()
+		resBytes, _ := t.execCmd(ctx, "trivy", "image", "--severity", "CRITICAL,HIGH", "--no-progress", imageName)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		outputStr := string(resBytes)
 
-		// Basic heuristic parse of findings
-		criticals := strings.Count(outputStr, "CRITICAL")
-		highs := strings.Count(outputStr, "HIGH")
+		criticals, highs, mediums, lows := parseSeverityCounts(outputStr)
 
-		passed := criticals == 0
 		return &VulnerabilityScanResult{
 			ImageScanned: imageName,
 			ScannerUsed:  "trivy",
 			Critical:     criticals,
 			High:         highs,
-			Passed:       passed,
+			Medium:       mediums,
+			Low:          lows,
+			Passed:       criticals == 0,
 			Details:      outputStr,
 		}, nil
 	}
 
 	// 2. Check if Docker Scout is available
-	hasDockerScout := exec.CommandContext(ctx, "docker", "scout", "version").Run() == nil
-	if hasDockerScout {
+	_, scoutCheckErr := t.execCmd(ctx, "docker", "scout", "version")
+	if scoutCheckErr == nil {
 		_, _ = fmt.Fprintf(out, "==> Scanning image '%s' using Docker Scout...\n", imageName)
-		cmd := exec.CommandContext(ctx, "docker", "scout", "cves", imageName)
-		resBytes, _ := cmd.CombinedOutput()
+		resBytes, _ := t.execCmd(ctx, "docker", "scout", "cves", imageName)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		outputStr := string(resBytes)
+		criticals, highs, mediums, lows := parseSeverityCounts(outputStr)
 		return &VulnerabilityScanResult{
 			ImageScanned: imageName,
 			ScannerUsed:  "docker-scout",
-			Passed:       true,
-			Details:      string(resBytes),
+			Critical:     criticals,
+			High:         highs,
+			Medium:       mediums,
+			Low:          lows,
+			Passed:       criticals == 0,
+			Details:      outputStr,
 		}, nil
 	}
 
@@ -78,7 +109,36 @@ func (t *TrivyScanner) ScanImage(ctx context.Context, imageName string, out io.W
 		ScannerUsed:  "internal-static-auditor",
 		Critical:     0,
 		High:         0,
+		Medium:       0,
+		Low:          0,
 		Passed:       true,
 		Details:      "Distroless/non-root security posture verified.",
 	}, nil
+}
+
+// parseSeverityCounts counts vulnerability severity occurrences across scanner
+// output lines while ignoring summary lines (e.g. "Total: 0 (HIGH: 0, CRITICAL: 0)").
+func parseSeverityCounts(output string) (critical, high, medium, low int) {
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "Total:") {
+			continue
+		}
+		tokens := strings.FieldsFunc(trimmed, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == '|' || r == ',' || r == '(' || r == ')' || r == '[' || r == ']'
+		})
+		for _, tok := range tokens {
+			switch tok {
+			case "CRITICAL":
+				critical++
+			case "HIGH":
+				high++
+			case "MEDIUM":
+				medium++
+			case "LOW":
+				low++
+			}
+		}
+	}
+	return critical, high, medium, low
 }

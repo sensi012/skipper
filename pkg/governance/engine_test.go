@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/unified-platform/container/pkg/config"
+	"github.com/sensi012/skipper/pkg/config"
 )
 
 func TestEvaluatePolicies(t *testing.T) {

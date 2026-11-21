@@ -1,4 +1,4 @@
-module github.com/unified-platform/container
+module github.com/sensi012/skipper
 
 go 1.25.5
 

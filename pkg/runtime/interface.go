@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/unified-platform/container/pkg/config"
+	"github.com/sensi012/skipper/pkg/config"
 )
 
 // WorkloadStatus represents current execution state across Docker or Kubernetes

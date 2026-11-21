@@ -49,7 +49,7 @@
 
 ### Phase 2: Autonomous Buildpacks & Production Manifest Synthesizer
 - [x] **Step 2.1: Multi-Language Autonomous Builder Engine**
-  - Implemented `CNBBuilder` ([`pkg/build/builder.go`](../pkg/build/builder.go)) supporting Go, Node.js, Python, Rust, and Dockerfiles.
+  - Implemented `CNBBuilder` ([`pkg/build/builder.go`](../pkg/build/builder.go)) supporting Go, Node.js, Python, Rust, Java, and Dockerfiles.
 - [x] **Step 2.2: Hardened Manifest Synthesizer**
   - Implemented synthesizer ([`pkg/synthesizer/synthesizer.go`](../pkg/synthesizer/synthesizer.go)) generating Deployments, Services, NetworkPolicies, and PDBs.
 - [x] **Step 2.3: Shift-Left Vulnerability Scanner**
@@ -77,8 +77,29 @@
 
 ### Phase 6: Production Hardening, Quality Assurance & Day-2 Features
 - [x] **Step 6.1: Quality Assurance & Multi-Tier Testing**
-  - 16/16 packages unit tested (100% PASS).
+  - 21/21 packages unit tested (100% PASS).
   - End-to-end integration pipeline validated ([`test/e2e/pipeline_test.go`](../test/e2e/pipeline_test.go)).
   - Microsecond latency benchmarks recorded ([`test/bench/benchmark_test.go`](../test/bench/benchmark_test.go)).
 - [x] **Step 6.2: Day-2 Developer Ergonomics**
   - Integrated `skipper doctor`, `skipper init`, `skipper dev` (hot-reload), `skipper port-forward`, `skipper secret`, and `skipper import compose`.
+  - Embedded JSON Schema Draft 2020-12 directly into the binary ([`schemas/embed.go`](../schemas/embed.go)) so `skipper explain --schema` works from any working directory.
+
+### Phase 7: Supply Chain Security, GitOps, Fleet & Autonomous Operations
+- [x] **Step 7.1: Supply Chain Security — SBOM Generation & OCI Image Signing**
+  - Implemented `SBOMGenerator` ([`pkg/security/sbom.go`](../pkg/security/sbom.go)) supporting CycloneDX 1.5 (`cyclonedx-json`) and SPDX 2.3 (`spdx-json`) via `syft`, `docker sbom`, and a deterministic Go-native fallback (`go.mod`, `package.json`, `requirements.txt`, or OCI image references).
+  - Implemented `ImageSigner` ([`pkg/security/sign.go`](../pkg/security/sign.go)) wrapping `cosign sign` and `cosign verify` with key-based and keyless OIDC modes, annotations, and dry-run previews (`skipper sbom`, `skipper sign`).
+- [x] **Step 7.2: Ephemeral Debug Sandbox & Session Recording**
+  - Implemented `EphemeralSandboxLauncher` ([`pkg/runtime/ephemeral.go`](../pkg/runtime/ephemeral.go)) supporting `kubectl debug` (with `--image`, `--target`, `--copy-to`, `--share-processes`) and Docker namespace-attached debug containers (`skipper debug --ephemeral`).
+  - Extended operational memory with structured debug session recording and replay ([`pkg/opmem/session.go`](../pkg/opmem/session.go)).
+- [x] **Step 7.3: OpenTelemetry Instrumentation & Canary Health Gates**
+  - Implemented `SynthesizeOTelConfig` ([`pkg/synthesizer/otel.go`](../pkg/synthesizer/otel.go)) generating OTLP env vars, Prometheus scrape annotations, and `monitoring.coreos.com/v1` `ServiceMonitor` manifests.
+  - Implemented `PrometheusHealthGate` ([`pkg/rollout/metrics.go`](../pkg/rollout/metrics.go)) querying `/api/v1/query` for error rate, P95 latency, and saturation thresholds with `RolloutController`-compatible canary gates (`skipper observe`).
+- [x] **Step 7.4: GitOps Export & Sync Engine**
+  - Implemented GitOps exporter ([`pkg/gitops/exporter.go`](../pkg/gitops/exporter.go)) generating base Kubernetes manifests, `kustomization.yaml`, environment overlays, and ArgoCD `Application` or FluxCD `GitRepository` + `Kustomization` definitions (`skipper gitops export`).
+- [x] **Step 7.5: Multi-Cluster Fleet Context & Drift Detection**
+  - Implemented `ContextManager` ([`pkg/cluster/manager.go`](../pkg/cluster/manager.go)) for listing, inspecting, switching kubeconfig contexts, and summarizing fleet reachability (`skipper context`).
+  - Implemented `DriftDetector` ([`pkg/cluster/drift.go`](../pkg/cluster/drift.go)) computing deterministic field-level diffs (`Image`, `Replicas`, `Ports`, `Resources`, `Env`, `MissingInLive`, `ExtraInLive`) between desired and live Kubernetes YAML (`skipper context drift`).
+- [x] **Step 7.6: Secret Sync with Vault & ExternalSecrets**
+  - Implemented `GenerateExternalSecretManifest` and stdlib HTTP `VaultSyncClient` (KV v2 `Push`/`Pull`) ([`pkg/secret/sync.go`](../pkg/secret/sync.go)) generating `external-secrets.io/v1beta1` `SecretStore` + `ExternalSecret` YAML for Vault, AWS Secrets Manager, and GCP Secret Manager (`skipper secret sync`).
+- [x] **Step 7.7: Extended Autonomous MCP Operational Tools**
+  - Extended the Model Context Protocol server ([`pkg/mcp/server.go`](../pkg/mcp/server.go)) to 10 tools by adding `skipper_rollback`, `skipper_investigate_incident`, `skipper_sbom`, and `skipper_drift_check` alongside the 6 core operational tools.

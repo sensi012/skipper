@@ -10,12 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/unified-platform/container/pkg/config"
+	"github.com/sensi012/skipper/pkg/config"
 )
 
 // KubernetesAdapter implements RuntimeEngine using kubectl and Kubernetes cluster API
 type KubernetesAdapter struct {
-	Namespace string
+	Namespace   string
+	execCommand func(ctx context.Context, name string, arg ...string) *exec.Cmd
 }
 
 // NewKubernetesAdapter constructs a Kubernetes runtime driver
@@ -23,7 +24,17 @@ func NewKubernetesAdapter(namespace string) *KubernetesAdapter {
 	if namespace == "" {
 		namespace = "default"
 	}
-	return &KubernetesAdapter{Namespace: namespace}
+	return &KubernetesAdapter{
+		Namespace:   namespace,
+		execCommand: exec.CommandContext,
+	}
+}
+
+func (k *KubernetesAdapter) command(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	if k.execCommand != nil {
+		return k.execCommand(ctx, name, arg...)
+	}
+	return exec.CommandContext(ctx, name, arg...)
 }
 
 func (k *KubernetesAdapter) Name() string {
@@ -31,7 +42,7 @@ func (k *KubernetesAdapter) Name() string {
 }
 
 func (k *KubernetesAdapter) Initialize(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "kubectl", "version", "--client")
+	cmd := k.command(ctx, "kubectl", "version", "--client")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("kubectl client unavailable: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -45,7 +56,7 @@ func (k *KubernetesAdapter) Deploy(ctx context.Context, spec *config.AppSpec) (*
 		return nil, fmt.Errorf("failed to generate manifests: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-n", k.Namespace, "-f", "-")
+	cmd := k.command(ctx, "kubectl", "apply", "-n", k.Namespace, "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -56,7 +67,7 @@ func (k *KubernetesAdapter) Deploy(ctx context.Context, spec *config.AppSpec) (*
 }
 
 func (k *KubernetesAdapter) Status(ctx context.Context, workloadName string) (*WorkloadStatus, error) {
-	cmd := exec.CommandContext(ctx, "kubectl", "get", "deployment", workloadName, "-n", k.Namespace, "-o", "jsonpath={.status.replicas}|{.status.availableReplicas}")
+	cmd := k.command(ctx, "kubectl", "get", "deployment", workloadName, "-n", k.Namespace, "-o", "jsonpath={.status.replicas}|{.status.availableReplicas}")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to query deployment status: %w", err)
@@ -94,7 +105,7 @@ func (k *KubernetesAdapter) Status(ctx context.Context, workloadName string) (*W
 }
 
 func (k *KubernetesAdapter) Stop(ctx context.Context, workloadName string) error {
-	cmd := exec.CommandContext(ctx, "kubectl", "scale", "deployment", workloadName, "-n", k.Namespace, "--replicas=0")
+	cmd := k.command(ctx, "kubectl", "scale", "deployment", workloadName, "-n", k.Namespace, "--replicas=0")
 	return cmd.Run()
 }
 
@@ -113,7 +124,7 @@ func (k *KubernetesAdapter) Logs(ctx context.Context, workloadName string, opts 
 		args = append(args, "-c", opts.Container)
 	}
 
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	cmd := k.command(ctx, "kubectl", args...)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	return cmd.Run()
@@ -124,9 +135,9 @@ func (k *KubernetesAdapter) Debug(ctx context.Context, opts DebugOptions, stdin 
 	targetPod := opts.TargetPod
 	if targetPod == "" {
 		// Discover first running pod for deployment
-		cmd := exec.CommandContext(ctx, "kubectl", "get", "pods", "-l", fmt.Sprintf("app=%s", opts.WorkloadName), "-n", k.Namespace, "-o", "jsonpath={.items[0].metadata.name}")
+		cmd := k.command(ctx, "kubectl", "get", "pods", "-l", fmt.Sprintf("app=%s", opts.WorkloadName), "-n", k.Namespace, "-o", "jsonpath={.items[0].metadata.name}")
 		out, err := cmd.CombinedOutput()
-		if err != nil || len(out) == 0 {
+		if err != nil || strings.TrimSpace(string(out)) == "" {
 			return 1, fmt.Errorf("no pods found to attach debug session: %s", string(out))
 		}
 		targetPod = strings.TrimSpace(string(out))
@@ -137,8 +148,18 @@ func (k *KubernetesAdapter) Debug(ctx context.Context, opts DebugOptions, stdin 
 		image = "nicolaka/netshoot:latest"
 	}
 
-	args := []string{"debug", "-it", targetPod, "-n", k.Namespace, fmt.Sprintf("--image=%s", image), "--", "/bin/sh"}
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	args := []string{"debug", "-it", targetPod, "-n", k.Namespace, fmt.Sprintf("--image=%s", image)}
+	if opts.TargetContainer != "" {
+		args = append(args, fmt.Sprintf("--target=%s", opts.TargetContainer))
+	}
+	args = append(args, "--")
+	if len(opts.Command) > 0 {
+		args = append(args, opts.Command...)
+	} else {
+		args = append(args, "/bin/sh")
+	}
+
+	cmd := k.command(ctx, "kubectl", args...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -152,6 +173,10 @@ func (k *KubernetesAdapter) Debug(ctx context.Context, opts DebugOptions, stdin 
 
 // GenerateStandardManifests produces vanilla, un-locked-in standard K8s Deployments & Services
 func (k *KubernetesAdapter) GenerateStandardManifests(spec *config.AppSpec) (string, error) {
+	if spec == nil || strings.TrimSpace(spec.Name) == "" {
+		return "", fmt.Errorf("app spec with a non-empty name is required")
+	}
+
 	replicas := 1
 	if spec.Runtime.Replicas.Min > 0 {
 		replicas = spec.Runtime.Replicas.Min
@@ -160,6 +185,23 @@ func (k *KubernetesAdapter) GenerateStandardManifests(spec *config.AppSpec) (str
 	image := spec.Image
 	if image == "" {
 		image = fmt.Sprintf("%s:latest", spec.Name)
+	}
+
+	cpuReq := spec.Runtime.Resources.CPU.Request
+	if cpuReq == "" {
+		cpuReq = "100m"
+	}
+	memReq := spec.Runtime.Resources.Memory.Request
+	if memReq == "" {
+		memReq = "128Mi"
+	}
+	cpuLim := spec.Runtime.Resources.CPU.Limit
+	if cpuLim == "" {
+		cpuLim = "500m"
+	}
+	memLim := spec.Runtime.Resources.Memory.Limit
+	if memLim == "" {
+		memLim = "512Mi"
 	}
 
 	var buf bytes.Buffer
@@ -182,7 +224,7 @@ func (k *KubernetesAdapter) GenerateStandardManifests(spec *config.AppSpec) (str
 	}
 
 	// Resources
-	buf.WriteString("        resources:\n          requests:\n            cpu: 100m\n            memory: 128Mi\n          limits:\n            cpu: 500m\n            memory: 512Mi\n")
+	buf.WriteString(fmt.Sprintf("        resources:\n          requests:\n            cpu: %s\n            memory: %s\n          limits:\n            cpu: %s\n            memory: %s\n", cpuReq, memReq, cpuLim, memLim))
 
 	// 2. Service if endpoints are defined
 	if len(spec.Endpoints) > 0 {

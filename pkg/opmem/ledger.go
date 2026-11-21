@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -54,15 +55,19 @@ type ExecutedCommand struct {
 
 // DebugSessionRecord preserves ephemeral troubleshooting sessions permanently
 type DebugSessionRecord struct {
-	SessionID          string            `json:"sessionId"`
-	StartedAt          time.Time         `json:"startedAt"`
-	EndedAt            time.Time         `json:"endedAt"`
-	Operator           string            `json:"operator"`
-	TargetPod          string            `json:"targetPod"`
-	WorkloadName       string            `json:"workloadName"`
-	CommandsExecuted   []ExecutedCommand `json:"commandsExecuted"`
-	ExitCode           int               `json:"exitCode"`
-	ResolutionSummary  string            `json:"resolutionSummary,omitempty"`
+	SessionID         string            `json:"sessionId"`
+	StartedAt         time.Time         `json:"startedAt"`
+	EndedAt           time.Time         `json:"endedAt"`
+	Operator          string            `json:"operator"`
+	TargetPod         string            `json:"targetPod"`
+	WorkloadName      string            `json:"workloadName"`
+	Runtime           string            `json:"runtime,omitempty"`
+	Namespace         string            `json:"namespace,omitempty"`
+	DebugImage        string            `json:"debugImage,omitempty"`
+	DryRun            bool              `json:"dryRun,omitempty"`
+	CommandsExecuted  []ExecutedCommand `json:"commandsExecuted"`
+	ExitCode          int               `json:"exitCode"`
+	ResolutionSummary string            `json:"resolutionSummary,omitempty"`
 }
 
 // CausalEvent correlates mutations, telemetry signals, and symptoms chronologically
@@ -220,18 +225,16 @@ func (l *OperationalMemoryLedger) ListDebugSessions(workload string) ([]DebugSes
 }
 
 func splitLines(s string) []string {
-	var lines []string
-	current := ""
-	for _, ch := range s {
-		if ch == '\n' {
-			lines = append(lines, current)
-			current = ""
-		} else if ch != '\r' {
-			current += string(ch)
-		}
+	if s == "" {
+		return nil
 	}
-	if current != "" {
-		lines = append(lines, current)
+	raw := strings.Split(s, "\n")
+	lines := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSuffix(line, "\r")
+		if line != "" {
+			lines = append(lines, line)
+		}
 	}
 	return lines
 }

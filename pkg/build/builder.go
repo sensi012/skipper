@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/unified-platform/container/pkg/config"
+	"github.com/sensi012/skipper/pkg/config"
 )
 
 // LanguageRuntime identifies the auto-detected stack
@@ -39,9 +39,13 @@ type BuilderEngine interface {
 	Build(ctx context.Context, spec *config.AppSpec, out io.Writer) (string, error)
 }
 
+// buildCmdRunner executes an external build tool command.
+type buildCmdRunner func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error
+
 // CNBBuilder handles language auto-detection and OCI image builds via Cloud Native Buildpacks or BuildKit
 type CNBBuilder struct {
 	DefaultBuilder string
+	runCmd         buildCmdRunner
 }
 
 // NewCNBBuilder creates a new CNB / BuildKit detection and build engine
@@ -49,6 +53,17 @@ func NewCNBBuilder() *CNBBuilder {
 	return &CNBBuilder{
 		DefaultBuilder: "paketobuildpacks/builder:base",
 	}
+}
+
+func (b *CNBBuilder) execCmd(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+	if b.runCmd != nil {
+		return b.runCmd(ctx, stdin, stdout, stderr, name, args...)
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
 }
 
 // Detect inspects the source directory to determine language, framework and required builder
@@ -116,6 +131,24 @@ func (b *CNBBuilder) Detect(ctx context.Context, sourceDir string) (*DetectionRe
 		}, nil
 	}
 
+	// 6. Check for Java
+	if _, err := os.Stat(filepath.Join(sourceDir, "pom.xml")); err == nil {
+		return &DetectionResult{
+			Runtime:    RuntimeJava,
+			Entrypoint: "pom.xml",
+			FilesFound: []string{"pom.xml"},
+			Builder:    b.DefaultBuilder,
+		}, nil
+	}
+	if _, err := os.Stat(filepath.Join(sourceDir, "build.gradle")); err == nil {
+		return &DetectionResult{
+			Runtime:    RuntimeJava,
+			Entrypoint: "build.gradle",
+			FilesFound: []string{"build.gradle"},
+			Builder:    b.DefaultBuilder,
+		}, nil
+	}
+
 	return &DetectionResult{
 		Runtime: RuntimeUnknown,
 		Builder: b.DefaultBuilder,
@@ -124,6 +157,13 @@ func (b *CNBBuilder) Detect(ctx context.Context, sourceDir string) (*DetectionRe
 
 // Build compiles source code into an OCI image
 func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Writer) (string, error) {
+	if spec == nil {
+		return "", fmt.Errorf("app spec must not be nil")
+	}
+	if out == nil {
+		out = io.Discard
+	}
+
 	sourceDir := spec.Build.Context
 	if sourceDir == "" {
 		sourceDir = "."
@@ -136,41 +176,38 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 
 	targetTag := spec.Image
 	if targetTag == "" {
+		if strings.TrimSpace(spec.Name) == "" {
+			return "", fmt.Errorf("either spec.Image or spec.Name must be specified")
+		}
 		targetTag = fmt.Sprintf("%s:latest", spec.Name)
 	}
 
 	_, _ = fmt.Fprintf(out, "==> Auto-detected stack: [%s] (Files: %s)\n", detection.Runtime, strings.Join(detection.FilesFound, ", "))
 
 	// Check if pack CLI is available
-	hasPack := exec.CommandContext(ctx, "pack", "version").Run() == nil
+	hasPack := b.execCmd(ctx, nil, nil, nil, "pack", "version") == nil
 
-	if hasPack && detection.Runtime != RuntimeDockerfile {
+	if hasPack && detection.Runtime != RuntimeDockerfile && spec.Build.Dockerfile == "" {
 		// Use native Cloud Native Buildpacks via pack CLI
 		builder := spec.Build.Builder
 		if builder == "" {
 			builder = detection.Builder
 		}
 		_, _ = fmt.Fprintf(out, "==> Building OCI image with Cloud Native Buildpacks (Builder: %s)...\n", builder)
-		cmd := exec.CommandContext(ctx, "pack", "build", targetTag, "--path", sourceDir, "--builder", builder)
-		cmd.Stdout = out
-		cmd.Stderr = out
-		if err := cmd.Run(); err != nil {
+		if err := b.execCmd(ctx, nil, out, out, "pack", "build", targetTag, "--path", sourceDir, "--builder", builder); err != nil {
 			return "", fmt.Errorf("pack build failed: %w", err)
 		}
 		return targetTag, nil
 	}
 
-	// Fallback path: If Dockerfile exists or pack is not installed, use Docker BuildKit
+	// Fallback path: If Dockerfile exists or explicit Dockerfile is configured, use Docker BuildKit
 	if detection.Runtime == RuntimeDockerfile || spec.Build.Dockerfile != "" {
 		dockerfile := "Dockerfile"
 		if spec.Build.Dockerfile != "" {
 			dockerfile = spec.Build.Dockerfile
 		}
 		_, _ = fmt.Fprintf(out, "==> Building OCI image via Docker BuildKit with %s...\n", dockerfile)
-		cmd := exec.CommandContext(ctx, "docker", "build", "-t", targetTag, "-f", filepath.Join(sourceDir, dockerfile), sourceDir)
-		cmd.Stdout = out
-		cmd.Stderr = out
-		if err := cmd.Run(); err != nil {
+		if err := b.execCmd(ctx, nil, out, out, "docker", "build", "-t", targetTag, "-f", filepath.Join(sourceDir, dockerfile), sourceDir); err != nil {
 			return "", fmt.Errorf("docker build failed: %w", err)
 		}
 		return targetTag, nil
@@ -183,11 +220,7 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 		return "", err
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", "build", "-t", targetTag, "-f", "-", sourceDir)
-	cmd.Stdin = strings.NewReader(synthDockerfile)
-	cmd.Stdout = out
-	cmd.Stderr = out
-	if err := cmd.Run(); err != nil {
+	if err := b.execCmd(ctx, strings.NewReader(synthDockerfile), out, out, "docker", "build", "-t", targetTag, "-f", "-", sourceDir); err != nil {
 		return "", fmt.Errorf("synthesized container build failed: %w", err)
 	}
 
