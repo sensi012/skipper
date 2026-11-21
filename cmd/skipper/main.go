@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/unified-platform/container/pkg/doctor"
 	"github.com/unified-platform/container/pkg/governance"
 	"github.com/unified-platform/container/pkg/local"
+	"github.com/unified-platform/container/pkg/mcp"
 	"github.com/unified-platform/container/pkg/opmem"
 	"github.com/unified-platform/container/pkg/rollout"
 	"github.com/unified-platform/container/pkg/runtime"
@@ -28,21 +30,25 @@ import (
 )
 
 var (
+	version       = "0.1.0"
 	targetRuntime string
 	namespace     string
 	appConfigFile string
+	outputFormat  string
 )
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "skipper",
-		Short: "Skipper: Unified Container & Kubernetes Runtime Abstraction CLI",
-		Long:  "A developer-first CLI unifying container build, local execution, production deployment, and deterministic diagnostics.",
+		Use:     "skipper",
+		Short:   "Skipper: Unified Container & Kubernetes Runtime Abstraction CLI",
+		Long:    "A developer-first CLI unifying container build, local execution, production deployment, and deterministic diagnostics.",
+		Version: version,
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&targetRuntime, "runtime", "r", "docker", "Target runtime: 'docker' (local) or 'kubernetes' (remote)")
 	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace (for kubernetes target)")
 	rootCmd.PersistentFlags().StringVarP(&appConfigFile, "config", "c", "", "Path to skipper.yaml specification (defaults to skipper.yaml or app.yaml)")
+	rootCmd.PersistentFlags().StringVarP(&outputFormat, "format", "f", "text", "Output format: 'text' or 'json' (optimized for AI agents)")
 
 	rootCmd.AddCommand(newBuildCmd())
 	rootCmd.AddCommand(newManifestCmd())
@@ -64,6 +70,8 @@ func main() {
 	rootCmd.AddCommand(newPortForwardCmd())
 	rootCmd.AddCommand(newSecretCmd())
 	rootCmd.AddCommand(newImportCmd())
+	rootCmd.AddCommand(newMCPCmd())
+	rootCmd.AddCommand(newExplainCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -423,6 +431,12 @@ func newDiagnoseCmd() *cobra.Command {
 				return err
 			}
 
+			if outputFormat == "json" {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(findings)
+			}
+
 			if len(findings) == 0 {
 				fmt.Println("[DIAGNOSIS COMPLETE: 0 ANOMALIES DETECTED] Workload appears healthy.")
 				return nil
@@ -438,7 +452,11 @@ func newDiagnoseCmd() *cobra.Command {
 						fmt.Printf("                   - %s\n", ev)
 					}
 				}
-				fmt.Printf("    Suggested Fix: %s\n\n", f.SuggestedFix)
+				fmt.Printf("    Suggested Fix: %s\n", f.SuggestedFix)
+				if f.RemediationCmd != "" {
+					fmt.Printf("    Remediation:   %s\n", f.RemediationCmd)
+				}
+				fmt.Println()
 			}
 			return nil
 		},
@@ -460,6 +478,12 @@ func newRightsizingCmd() *cobra.Command {
 			res, err := gov.AnalyzeRightsizing(ctx, spec)
 			if err != nil {
 				return err
+			}
+
+			if outputFormat == "json" {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(res)
 			}
 
 			fmt.Printf("=== FINOPS WORKLOAD RIGHTSIZING ANALYSIS ===\n")
@@ -487,6 +511,15 @@ func newPolicyCmd() *cobra.Command {
 			violations, err := gov.EvaluatePolicies(spec)
 			if err != nil {
 				return err
+			}
+
+			if outputFormat == "json" {
+				if violations == nil {
+					violations = []governance.PolicyViolation{}
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(violations)
 			}
 
 			if len(violations) == 0 {
@@ -712,8 +745,15 @@ func newDoctorCmd() *cobra.Command {
 		Short: "Check local environment prerequisites and port collisions",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			engine := doctor.NewDoctorEngine()
-			fmt.Println("==> Running Skipper environment health audit...")
 			report := engine.RunDiagnostics(context.Background())
+
+			if outputFormat == "json" {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(report)
+			}
+
+			fmt.Println("==> Running Skipper environment health audit...")
 
 			for _, check := range report.Checks {
 				symbol := "[✓]"
@@ -939,4 +979,67 @@ func newImportCmd() *cobra.Command {
 
 	importCmd.AddCommand(composeCmd)
 	return importCmd
+}
+
+func newMCPCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "mcp",
+		Short: "Start Skipper Model Context Protocol (MCP) server over stdio for AI agents",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			srv := mcp.NewMCPServer()
+			return srv.Start(context.Background())
+		},
+	}
+}
+
+func newExplainCmd() *cobra.Command {
+	var showRawSchema bool
+	cmd := &cobra.Command{
+		Use:   "explain",
+		Short: "Output declarative schema and instruction grammar for AI agent consumption",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if showRawSchema {
+				schemaData, err := os.ReadFile("schemas/skipper.schema.json")
+				if err != nil {
+					return fmt.Errorf("unable to load schemas/skipper.schema.json: %w", err)
+				}
+				fmt.Println(string(schemaData))
+				return nil
+			}
+
+			// Clean, high-density AI instruction grammar
+			grammar := `# Skipper AI Agent Operational Specification
+
+## 1. Intent Model (skipper.yaml)
+Skipper translates a declarative 'skipper.yaml' into standard OCI containers and hardened Kubernetes manifests.
+- Version: v1alpha1
+- Name: string (alphanumeric lowercase, dashes)
+- Type: 'service' | 'worker' | 'job'
+- Endpoints: list of {name, port, protocol, public}
+- Runtime.Resources: {cpu: {request, limit}, memory: {request, limit}}
+- Security: {runAsNonRoot: true, readOnlyRootFilesystem: bool}
+
+## 2. Command Execution Playbook for AI Agents
+- Check Workstation Status: run 'skipper doctor -f json'
+- Audit Policies Before Deploy: run 'skipper policy-check -f json'
+- Compile Kubernetes Manifests: run 'skipper manifest'
+- Diagnose Failing Workloads: run 'skipper diagnose <name> -f json'
+- Reclaim Cloud Cost / Rightsize: run 'skipper rightsize -f json'
+- Manage Encrypted Credentials: run 'skipper secret set KEY=VAL' / 'skipper secret export'
+- Migrate Docker Compose: run 'skipper import compose [path]'
+
+## 3. Self-Healing & Remediation Loop
+When diagnosing a failing workload:
+1. Call 'skipper diagnose <workload> -f json'
+2. Parse 'detectorName', 'rootCause', and 'remediationCmd'
+3. Execute 'remediationCmd' or adjust memory/cpu in 'skipper.yaml'
+4. Re-run 'skipper deploy' or 'skipper up'
+`
+			fmt.Print(grammar)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&showRawSchema, "schema", false, "Output formal JSON Schema Draft 2020-12")
+	return cmd
 }

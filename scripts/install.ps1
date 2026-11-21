@@ -28,5 +28,7 @@ if ($userPath -notlike "*$InstallDir*") {
     [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallDir", "User")
     Write-Host "==> Added $InstallDir to user PATH." -ForegroundColor Green
 }
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Process") + ";$InstallDir"
 
 Write-Host "==> Installation complete! Run 'skipper --help' to get started." -ForegroundColor Green
+Write-Host "    (Note: If you have other PowerShell terminal windows open, restart them to refresh PATH)" -ForegroundColor Yellow

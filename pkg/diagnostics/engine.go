@@ -21,14 +21,15 @@ const (
 
 // DiagnosticFinding represents a deterministic or AI-grounded root-cause determination
 type DiagnosticFinding struct {
-	DetectorName string           `json:"detectorName"`
-	Severity     IncidentSeverity `json:"severity"`
-	WorkloadName string           `json:"workloadName"`
-	RootCause    string           `json:"rootCause"`
-	Evidence     []string         `json:"evidence"`
-	SuggestedFix string           `json:"suggestedFix"`
-	Confidence   float64          `json:"confidence"` // 0.0 - 1.0
-	Timestamp    time.Time        `json:"timestamp"`
+	DetectorName   string           `json:"detectorName"`
+	Severity       IncidentSeverity `json:"severity"`
+	WorkloadName   string           `json:"workloadName"`
+	RootCause      string           `json:"rootCause"`
+	Evidence       []string         `json:"evidence"`
+	SuggestedFix   string           `json:"suggestedFix"`
+	RemediationCmd string           `json:"remediationCmd,omitempty"`
+	Confidence     float64          `json:"confidence"` // 0.0 - 1.0
+	Timestamp      time.Time        `json:"timestamp"`
 }
 
 // Detector interface implemented by all deterministic rule evaluators
@@ -92,14 +93,15 @@ func (d *OOMKilledDetector) Name() string { return "OOMKilledDetector" }
 func (d *OOMKilledDetector) Evaluate(ctx context.Context, ns, workload, logs string) (*DiagnosticFinding, error) {
 	if strings.Contains(logs, "exit code 137") || strings.Contains(logs, "Out of memory") || strings.Contains(logs, "OOMKilled") {
 		return &DiagnosticFinding{
-			DetectorName: d.Name(),
-			Severity:     SeverityCritical,
-			WorkloadName: workload,
-			RootCause:    "Container terminated by Linux Kernel OOM (Out Of Memory) Killer. Memory limit breached.",
-			Evidence:     []string{"Process exited with code 137", "Kernel OOM event detected in container cgroup"},
-			SuggestedFix: "Increase memory limits in skipper.yaml: 'runtime.resources.memory.limit: 1Gi'",
-			Confidence:   1.0,
-			Timestamp:    time.Now(),
+			DetectorName:   d.Name(),
+			Severity:       SeverityCritical,
+			WorkloadName:   workload,
+			RootCause:      "Container terminated by Linux Kernel OOM (Out Of Memory) Killer. Memory limit breached.",
+			Evidence:       []string{"Process exited with code 137", "Kernel OOM event detected in container cgroup"},
+			SuggestedFix:   "Increase memory limits in skipper.yaml: 'runtime.resources.memory.limit: 1Gi'",
+			RemediationCmd: "skipper rightsize",
+			Confidence:     1.0,
+			Timestamp:      time.Now(),
 		}, nil
 	}
 	return nil, nil
@@ -112,14 +114,15 @@ func (d *CrashLoopDetector) Name() string { return "CrashLoopDetector" }
 func (d *CrashLoopDetector) Evaluate(ctx context.Context, ns, workload, logs string) (*DiagnosticFinding, error) {
 	if strings.Contains(logs, "CrashLoopBackOff") || strings.Contains(logs, "panic:") || strings.Contains(logs, "SIGSEGV") {
 		return &DiagnosticFinding{
-			DetectorName: d.Name(),
-			Severity:     SeverityCritical,
-			WorkloadName: workload,
-			RootCause:    "Application process panicking or aborting immediately upon startup.",
-			Evidence:     []string{"CrashLoopBackOff condition active", "Fatal runtime exception or unhandled panic detected in stderr"},
-			SuggestedFix: "Inspect application startup environment variables or run 'skipper debug' to inspect missing config files",
-			Confidence:   0.95,
-			Timestamp:    time.Now(),
+			DetectorName:   d.Name(),
+			Severity:       SeverityCritical,
+			WorkloadName:   workload,
+			RootCause:      "Application process panicking or aborting immediately upon startup.",
+			Evidence:       []string{"CrashLoopBackOff condition active", "Fatal runtime exception or unhandled panic detected in stderr"},
+			SuggestedFix:   "Inspect application startup environment variables or run 'skipper debug' to inspect missing config files",
+			RemediationCmd: fmt.Sprintf("skipper debug %s", workload),
+			Confidence:     0.95,
+			Timestamp:      time.Now(),
 		}, nil
 	}
 	return nil, nil
@@ -132,14 +135,15 @@ func (d *ImagePullDetector) Name() string { return "ImagePullDetector" }
 func (d *ImagePullDetector) Evaluate(ctx context.Context, ns, workload, logs string) (*DiagnosticFinding, error) {
 	if strings.Contains(logs, "ImagePullBackOff") || strings.Contains(logs, "ErrImagePull") || strings.Contains(logs, "manifest unknown") {
 		return &DiagnosticFinding{
-			DetectorName: d.Name(),
-			Severity:     SeverityCritical,
-			WorkloadName: workload,
-			RootCause:    "Container registry returned 404/Not Found or image tag does not exist.",
-			Evidence:     []string{"ErrImagePull reported by kubelet", "Registry authentication or image tag mismatch"},
-			SuggestedFix: "Run 'skipper build' to generate image locally or verify registry pull credentials",
-			Confidence:   1.0,
-			Timestamp:    time.Now(),
+			DetectorName:   d.Name(),
+			Severity:       SeverityCritical,
+			WorkloadName:   workload,
+			RootCause:      "Container registry returned 404/Not Found or image tag does not exist.",
+			Evidence:       []string{"ErrImagePull reported by kubelet", "Registry authentication or image tag mismatch"},
+			SuggestedFix:   "Run 'skipper build' to generate image locally or verify registry pull credentials",
+			RemediationCmd: "skipper build",
+			Confidence:     1.0,
+			Timestamp:      time.Now(),
 		}, nil
 	}
 	return nil, nil
@@ -152,14 +156,15 @@ func (d *ReadinessProbeDetector) Name() string { return "ReadinessProbeDetector"
 func (d *ReadinessProbeDetector) Evaluate(ctx context.Context, ns, workload, logs string) (*DiagnosticFinding, error) {
 	if strings.Contains(logs, "Readiness probe failed") || strings.Contains(logs, "connection refused") {
 		return &DiagnosticFinding{
-			DetectorName: d.Name(),
-			Severity:     SeverityWarning,
-			WorkloadName: workload,
-			RootCause:    "HTTP readiness probe endpoint failing or port unreachable.",
-			Evidence:     []string{"Kubelet reported readiness probe HTTP 500 or connection refused"},
-			SuggestedFix: "Verify health.readiness.path and port configuration in skipper.yaml matches HTTP server listener",
-			Confidence:   0.90,
-			Timestamp:    time.Now(),
+			DetectorName:   d.Name(),
+			Severity:       SeverityWarning,
+			WorkloadName:   workload,
+			RootCause:      "HTTP readiness probe endpoint failing or port unreachable.",
+			Evidence:       []string{"Kubelet reported readiness probe HTTP 500 or connection refused"},
+			SuggestedFix:   "Verify health.readiness.path and port configuration in skipper.yaml matches HTTP server listener",
+			RemediationCmd: fmt.Sprintf("skipper logs %s", workload),
+			Confidence:     0.90,
+			Timestamp:      time.Now(),
 		}, nil
 	}
 	return nil, nil
@@ -172,14 +177,15 @@ func (d *PendingPodDetector) Name() string { return "PendingPodDetector" }
 func (d *PendingPodDetector) Evaluate(ctx context.Context, ns, workload, logs string) (*DiagnosticFinding, error) {
 	if strings.Contains(logs, "Insufficient cpu") || strings.Contains(logs, "Insufficient memory") || strings.Contains(logs, "0/1 nodes are available") {
 		return &DiagnosticFinding{
-			DetectorName: d.Name(),
-			Severity:     SeverityCritical,
-			WorkloadName: workload,
-			RootCause:    "Pod cannot be scheduled due to cluster resource starvation (CPU/Memory limits exceed cluster capacity).",
-			Evidence:     []string{"Kubernetes scheduler event: Insufficient compute resources"},
-			SuggestedFix: "Scale cluster node pool or lower requested resource allocations in skipper.yaml",
-			Confidence:   1.0,
-			Timestamp:    time.Now(),
+			DetectorName:   d.Name(),
+			Severity:       SeverityCritical,
+			WorkloadName:   workload,
+			RootCause:      "Pod cannot be scheduled due to cluster resource starvation (CPU/Memory limits exceed cluster capacity).",
+			Evidence:       []string{"Kubernetes scheduler event: Insufficient compute resources"},
+			SuggestedFix:   "Scale cluster node pool or lower requested resource allocations in skipper.yaml",
+			RemediationCmd: "skipper rightsize",
+			Confidence:     1.0,
+			Timestamp:      time.Now(),
 		}, nil
 	}
 	return nil, nil
@@ -192,14 +198,15 @@ func (d *NetworkDropDetector) Name() string { return "NetworkDropDetector" }
 func (d *NetworkDropDetector) Evaluate(ctx context.Context, ns, workload, logs string) (*DiagnosticFinding, error) {
 	if strings.Contains(logs, "NetworkPolicy dropped") || strings.Contains(logs, "Connection timed out") {
 		return &DiagnosticFinding{
-			DetectorName: d.Name(),
-			Severity:     SeverityWarning,
-			WorkloadName: workload,
-			RootCause:    "Network egress/ingress packets dropped by active NetworkPolicy isolation rules.",
-			Evidence:     []string{"Connection timeout across inter-service call"},
-			SuggestedFix: "Declare required dependent service in skipper.yaml 'dependencies.services' to synthesize allow rules",
-			Confidence:   0.85,
-			Timestamp:    time.Now(),
+			DetectorName:   d.Name(),
+			Severity:       SeverityWarning,
+			WorkloadName:   workload,
+			RootCause:      "Network egress/ingress packets dropped by active NetworkPolicy isolation rules.",
+			Evidence:       []string{"Connection timeout across inter-service call"},
+			SuggestedFix:   "Declare required dependent service in skipper.yaml 'dependencies.services' to synthesize allow rules",
+			RemediationCmd: "skipper manifest",
+			Confidence:     0.85,
+			Timestamp:      time.Now(),
 		}, nil
 	}
 	return nil, nil
@@ -212,14 +219,15 @@ func (d *IngressRoutingDetector) Name() string { return "IngressRoutingDetector"
 func (d *IngressRoutingDetector) Evaluate(ctx context.Context, ns, workload, logs string) (*DiagnosticFinding, error) {
 	if strings.Contains(logs, "503 Service Temporarily Unavailable") || strings.Contains(logs, "no endpoints available") {
 		return &DiagnosticFinding{
-			DetectorName: d.Name(),
-			Severity:     SeverityWarning,
-			WorkloadName: workload,
-			RootCause:    "Ingress controller has no healthy backend Service endpoints available to route traffic.",
-			Evidence:     []string{"HTTP 503 from ingress controller", "0 endpoints registered for backend Service"},
-			SuggestedFix: "Ensure pod readiness probe passes so pod is added to Service endpoints slice",
-			Confidence:   0.90,
-			Timestamp:    time.Now(),
+			DetectorName:   d.Name(),
+			Severity:       SeverityWarning,
+			WorkloadName:   workload,
+			RootCause:      "Ingress controller has no healthy backend Service endpoints available to route traffic.",
+			Evidence:       []string{"HTTP 503 from ingress controller", "0 endpoints registered for backend Service"},
+			SuggestedFix:   "Ensure pod readiness probe passes so pod is added to Service endpoints slice",
+			RemediationCmd: fmt.Sprintf("skipper status %s", workload),
+			Confidence:     0.90,
+			Timestamp:      time.Now(),
 		}, nil
 	}
 	return nil, nil
@@ -232,14 +240,15 @@ func (d *DNSResolutionDetector) Name() string { return "DNSResolutionDetector" }
 func (d *DNSResolutionDetector) Evaluate(ctx context.Context, ns, workload, logs string) (*DiagnosticFinding, error) {
 	if strings.Contains(logs, "dial tcp: lookup") || strings.Contains(logs, "server misbehaving") {
 		return &DiagnosticFinding{
-			DetectorName: d.Name(),
-			Severity:     SeverityWarning,
-			WorkloadName: workload,
-			RootCause:    "Cluster CoreDNS resolution failed for hostname.",
-			Evidence:     []string{"Lookup failure inside application socket layer"},
-			SuggestedFix: "Verify CoreDNS health and verify service names use standard '<service>.<namespace>.svc.cluster.local' conventions",
-			Confidence:   0.90,
-			Timestamp:    time.Now(),
+			DetectorName:   d.Name(),
+			Severity:       SeverityWarning,
+			WorkloadName:   workload,
+			RootCause:      "Cluster CoreDNS resolution failed for hostname.",
+			Evidence:       []string{"Lookup failure inside application socket layer"},
+			SuggestedFix:   "Verify CoreDNS health and verify service names use standard '<service>.<namespace>.svc.cluster.local' conventions",
+			RemediationCmd: "skipper local status",
+			Confidence:     0.90,
+			Timestamp:      time.Now(),
 		}, nil
 	}
 	return nil, nil

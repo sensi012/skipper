@@ -84,8 +84,21 @@ Modify any code file—Skipper detects the edit, rebuilds the container, and syn
 | `skipper diagnose` | Run deterministic root-cause analysis on failing pods (OOMKilled, CrashLoop, probe fails). |
 | `skipper rightsize` | Compare requested vs P95 compute usage to identify wasted cloud spend. |
 | `skipper import compose` | Migrate legacy `docker-compose.yaml` files into native `skipper.yaml`. |
+| `skipper mcp` | Launch official Model Context Protocol (MCP) server over stdio for AI agents. |
+| `skipper explain` | Output operational mental model & JSON schema for AI agent task planning. |
 
 👉 **Full command syntax & examples:** See the [CLI Reference Manual](docs/cli-reference.md).
+
+---
+
+## 🤖 Built for Developers & AI Agents Alike
+
+Skipper provides a dual-interface design: human developers enjoy rich visual CLI diagnostics and interactive scaffolding, while AI coding agents (Claude Code, Cursor, Windsurf, Antigravity) gain programmatic superpowers:
+
+1. **Global `--format json` Flag:** Every audit, diagnostic, and telemetry command supports structured JSON output (`skipper doctor -f json`, `skipper diagnose -f json`, `skipper policy-check -f json`).
+2. **Machine-Actionable Remediations:** Every diagnostic failure includes a copy-paste or agent-executable `remediationCmd` for automated self-healing.
+3. **Official Model Context Protocol (MCP) Server:** Run `skipper mcp` to connect Skipper directly to MCP-compatible AI clients over stdio, exposing tools like `skipper_doctor`, `skipper_policy_check`, `skipper_diagnose`, and `skipper_rightsize`.
+4. **Self-Introspection & JSON Schema:** `skipper explain` generates the operational specification prompt, and `skipper explain --schema` outputs the strict JSON Schema Draft 2020-12 specification of `skipper.yaml`.
 
 ---
 

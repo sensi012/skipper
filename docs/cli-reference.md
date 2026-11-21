@@ -172,3 +172,40 @@ Compares requested CPU/memory against actual P95 utilization to calculate monthl
 ```bash
 $ skipper rightsize
 ```
+
+---
+
+## 4. AI Agent & Tooling Integrations
+
+### Global `--format json` Flag
+Any CLI diagnostic or audit command supports machine-parsable JSON output, specifically tailored for LLM function calling and automated workflows:
+```bash
+$ skipper doctor --format json
+$ skipper diagnose payment-api -f json
+$ skipper policy-check -f json
+$ skipper rightsize -f json
+```
+
+### `skipper mcp`
+Launches an official Model Context Protocol (MCP) server over standard I/O (`stdio`). This allows AI agents (Claude Desktop, Cursor, Antigravity, Windsurf) to directly invoke Skipper as tools:
+- `skipper_doctor`: Workspace health inspection.
+- `skipper_init`: Language stack inspection & specification generation.
+- `skipper_policy_check`: Enterprise compliance auditing.
+- `skipper_manifest`: Synthesis of standard Kubernetes manifests.
+- `skipper_diagnose`: Deterministic crash triage with actionable remediation commands.
+- `skipper_rightsize`: Compute optimization & FinOps recommendations.
+
+```bash
+$ skipper mcp
+```
+
+### `skipper explain`
+Outputs an operational playbook and grammar designed to be included in an AI agent's system prompt or scratchpad:
+```bash
+$ skipper explain
+```
+
+To retrieve the strict JSON Schema (Draft 2020-12) describing `skipper.yaml`:
+```bash
+$ skipper explain --schema
+```
