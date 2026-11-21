@@ -61,19 +61,49 @@ $ skipper dev
 ```
 
 ### `skipper build`
-Auto-detects Go, Node.js, Python, Rust, Java, or custom Dockerfiles and builds standard OCI images without manual Dockerfile authoring. Records build mutations into operational memory.
+Builds OCI-compliant container images using automatic mode resolution across single-service, Docker Compose, and monorepo subdirectory layouts. Records build mutations into operational memory.
+
+**Build Modes (resolution order):**
+1. **Explicit Compose (`--compose <path>`):** Builds all services with a `build:` block (sequentially in dependency order) and skips prebuilt `image:` services.
+2. **Explicit Subdirectory Discovery (`--discover`):** Scans subdirectories up to 2 levels deep for Dockerfiles or stack markers (`go.mod`, `package.json`, `requirements.txt`, `pyproject.toml`, `Cargo.toml`, `pom.xml`, `build.gradle`).
+3. **Single-Service (`skipper.yaml` / `app.yaml` / `-c`):** Classic single-app build using CNB (`pack`), Docker BuildKit, or synthesized multi-stage Dockerfiles.
+4. **Auto-Detected Compose:** When no `skipper.yaml` exists, automatically looks for `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml`.
+5. **Auto-Discover Fallback:** If neither `skipper.yaml` nor a compose file exists, automatically scans subdirectories (depth 2) and builds discovered services.
 
 **Flags:**
-- `-t`, `--tag <image:tag>` — Override target OCI image tag (e.g. `my-app:v1.0.0`, defaults to `spec.Image` or `<name>:latest`)
-- `--save` — Persist the built image tag into `skipper.yaml`
+- `--compose <path>` — Path to a Docker Compose file for multi-service builds
+- `--discover` — Scan subdirectories (depth 2) and build discovered services
+- `--service <name[,name...]>` — Filter to specific service(s) in compose or discover mode (repeatable or comma-separated)
+- `-t`, `--tag <image:tag>` — Override target OCI image tag (single-service builds or when filtered to 1 service via `--service`)
+- `--save` — Persist the built image tag into `skipper.yaml` (single-service mode only)
+- Supports global `--format json` (emits `{"project","mode","results":[...]}` in multi-service modes)
 
 ```bash
+# Single-service build (with skipper.yaml)
 $ skipper build
 ==> Auto-detected stack: [go] (Files: go.mod)
 ==> Synthesizing optimal multi-stage container build for [go]...
 ==> Successfully built and tagged OCI image: payment-api:latest
 
 $ skipper build -t ghcr.io/my-org/payment-api:v1.2.3 --save
+
+# Multi-service Compose repo (without skipper.yaml)
+$ skipper build
+==> No skipper.yaml found; using docker-compose.yml (project: three-tier, 3 services)
+==> [1/3] Skipping service 'db' (prebuilt image postgres:16-alpine)
+==> [2/3] Building service 'backend' (context: backend)
+...
+==> [3/3] Building service 'frontend' (context: frontend)
+...
+
+SERVICE              STATUS     IMAGE                                DURATION
+db                   skipped    postgres:16-alpine                   -
+backend              built      three-tier-backend:latest            1842ms
+frontend             built      three-tier-frontend:latest           612ms
+
+# Build only a single service from Compose or discovered monorepo
+$ skipper build --service backend
+$ skipper build --discover --service frontend --format json
 ```
 
 ### `skipper up` / `skipper down`
@@ -176,10 +206,18 @@ Forwarding from 127.0.0.1:8080 -> 8080
 ```
 
 ### `skipper import compose`
-Translates legacy `docker-compose.yaml` (or `compose.yaml`) files into native `skipper.yaml` with production-hardened defaults.
+Translates `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml` files into native `skipper.yaml` with production-hardened defaults (supports long-syntax ports/volumes, build args/target, and environment lookups).
+
+**Flags:**
+- `--service <name>` — Specific service in the Compose file to transpile (if omitted, selects the first buildable service alphabetically)
+
 ```bash
-$ skipper import compose docker-compose.yaml
-==> Successfully transpiled 'docker-compose.yaml' into 'skipper.yaml' (Service: web)!
+$ skipper import compose
+==> Successfully transpiled 'docker-compose.yml' into 'skipper.yaml' (Service: backend)!
+Note: Compose file has 3 services (backend, db, frontend); imported 'backend'. Use --service to choose, or run 'skipper build' directly for all services.
+
+$ skipper import compose docker-compose.yml --service frontend
+==> Successfully transpiled 'docker-compose.yml' into 'skipper.yaml' (Service: frontend)!
 ```
 
 ---

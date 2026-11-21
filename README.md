@@ -76,7 +76,7 @@ Modify any code file—Skipper detects the edit, rebuilds the container, and syn
 | :--- | :--- |
 | `skipper doctor` | Audit local prerequisites (Docker daemon, `kubectl`, `kind`, and port availability). |
 | `skipper init` | Auto-detect Go, Node.js, Python, Rust, or Java projects and scaffold `skipper.yaml`. |
-| `skipper build` | Auto-detect language and synthesize an optimized multi-stage distroless OCI image. |
+| `skipper build` | Auto-detect stack and build OCI images (supports `skipper.yaml`, Docker Compose multi-service repos, and monorepo subdirectory discovery). |
 | `skipper up` / `down` | Launch or terminate the workload in Docker or a local Kind cluster. |
 | `skipper dev` | Foreground watcher that synchronizes edits and hot-reloads the application. |
 | `skipper local` | Create, inspect, or tear down a local Kind Kubernetes cluster (`skipper local create\|status\|destroy`). |

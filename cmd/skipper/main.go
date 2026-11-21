@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/sensi012/skipper/pkg/bootstrapper"
 	"github.com/sensi012/skipper/pkg/build"
 	"github.com/sensi012/skipper/pkg/cluster"
@@ -30,6 +31,7 @@ import (
 	"github.com/sensi012/skipper/pkg/transpile"
 	"github.com/sensi012/skipper/pkg/tunnel"
 	"github.com/sensi012/skipper/schemas"
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
@@ -39,6 +41,7 @@ var (
 	namespace     string
 	appConfigFile string
 	outputFormat  string
+	newCNBBuilder = build.NewCNBBuilder
 )
 
 func newRootCmd() *cobra.Command {
@@ -133,56 +136,290 @@ func loadSpec() (*config.AppSpec, error) {
 func newBuildCmd() *cobra.Command {
 	var imageTag string
 	var saveTag bool
+	var composeFile string
+	var servicesFilter []string
+	var discoverFlag bool
+
 	cmd := &cobra.Command{
 		Use:   "build",
 		Short: "Auto-detect stack and build OCI-compliant container image",
+		Long:  "Auto-detect language/Dockerfile and build OCI container images from skipper.yaml, a Docker Compose file, or discovered monorepo subdirectories.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			spec, err := loadSpec()
-			if err != nil {
-				return err
-			}
-			if strings.TrimSpace(imageTag) != "" {
-				spec.Image = strings.TrimSpace(imageTag)
-			}
-			builder := build.NewCNBBuilder()
-			ctx := context.Background()
-
-			tag, err := builder.Build(ctx, spec, cmd.OutOrStdout())
-			if err != nil {
-				return err
+			if strings.TrimSpace(composeFile) != "" && discoverFlag {
+				return fmt.Errorf("--compose and --discover cannot be used together")
 			}
 
-			if saveTag {
-				cfgPath := resolveConfigPath()
-				spec.Image = tag
-				outData, err := yaml.Marshal(spec)
-				if err != nil {
-					return fmt.Errorf("failed to serialize %s: %w", cfgPath, err)
+			// Determine build mode
+			if strings.TrimSpace(composeFile) != "" {
+				return runMultiServiceComposeBuild(cmd, composeFile, false, servicesFilter, imageTag, saveTag)
+			}
+			if discoverFlag {
+				return runMultiServiceDiscoverBuild(cmd, servicesFilter, imageTag, saveTag)
+			}
+
+			hasExplicitSpec := appConfigFile != "" || fileExists("skipper.yaml") || fileExists("app.yaml")
+			if hasExplicitSpec {
+				if len(servicesFilter) > 0 {
+					return fmt.Errorf("--service requires compose or discover mode")
 				}
-				if err := os.WriteFile(cfgPath, outData, 0644); err != nil {
-					return fmt.Errorf("failed to update %s: %w", cfgPath, err)
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "==> Saved image '%s' to %s\n", tag, cfgPath)
+				return runSingleServiceBuild(cmd, imageTag, saveTag)
 			}
 
-			// Record build into operational memory
-			if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
-				_ = ledger.RecordTelemetryEvent(&opmem.CausalEvent{
-					Timestamp:   time.Now(),
-					Type:        "MUTATION",
-					Source:      "app build",
-					Description: fmt.Sprintf("Built and tagged OCI image %s", tag),
-					Severity:    "INFO",
-				})
+			if cf, err := transpile.FindComposeFile("."); err == nil {
+				return runMultiServiceComposeBuild(cmd, cf, true, servicesFilter, imageTag, saveTag)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "==> Successfully built and tagged OCI image: %s\n", tag)
-			return nil
+			return runMultiServiceDiscoverBuild(cmd, servicesFilter, imageTag, saveTag)
 		},
 	}
 	cmd.Flags().StringVarP(&imageTag, "tag", "t", "", "Override target OCI image tag (e.g. my-app:v1.0.0)")
 	cmd.Flags().BoolVar(&saveTag, "save", false, "Persist the built image tag into skipper.yaml")
+	cmd.Flags().StringVar(&composeFile, "compose", "", "Path to Docker Compose file for multi-service builds")
+	cmd.Flags().StringSliceVar(&servicesFilter, "service", nil, "Build only specified service(s) in compose or discover mode")
+	cmd.Flags().BoolVar(&discoverFlag, "discover", false, "Scan subdirectories (depth 2) and build discovered services")
 	return cmd
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func runSingleServiceBuild(cmd *cobra.Command, imageTag string, saveTag bool) error {
+	spec, err := loadSpec()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(imageTag) != "" {
+		spec.Image = strings.TrimSpace(imageTag)
+	}
+	builder := newCNBBuilder()
+	ctx := context.Background()
+
+	tag, err := builder.Build(ctx, spec, cmd.OutOrStdout())
+	if err != nil {
+		return err
+	}
+
+	if saveTag {
+		cfgPath := resolveConfigPath()
+		spec.Image = tag
+		outData, err := yaml.Marshal(spec)
+		if err != nil {
+			return fmt.Errorf("failed to serialize %s: %w", cfgPath, err)
+		}
+		if err := os.WriteFile(cfgPath, outData, 0644); err != nil {
+			return fmt.Errorf("failed to update %s: %w", cfgPath, err)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "==> Saved image '%s' to %s\n", tag, cfgPath)
+	}
+
+	if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
+		_ = ledger.RecordTelemetryEvent(&opmem.CausalEvent{
+			Timestamp:   time.Now(),
+			Type:        "MUTATION",
+			Source:      "app build",
+			Description: fmt.Sprintf("Built and tagged OCI image %s", tag),
+			Severity:    "INFO",
+		})
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "==> Successfully built and tagged OCI image: %s\n", tag)
+	return nil
+}
+
+func runMultiServiceComposeBuild(cmd *cobra.Command, composePath string, autoDetected bool, servicesFilter []string, imageTag string, saveTag bool) error {
+	proj, err := transpile.LoadComposeProject(composePath)
+	if err != nil {
+		return err
+	}
+
+	progressOut := cmd.OutOrStdout()
+	if outputFormat == "json" {
+		progressOut = cmd.ErrOrStderr()
+	}
+
+	if autoDetected {
+		fmt.Fprintf(progressOut, "==> No skipper.yaml found; using %s (project: %s, %d services)\n", composePath, proj.Name, len(proj.Services))
+	}
+
+	targets := make([]build.ServiceBuildTarget, 0, len(proj.Services))
+	for _, svc := range proj.Services {
+		specCopy := *svc.Spec
+		if !svc.HasBuild {
+			targets = append(targets, build.ServiceBuildTarget{
+				Name:       svc.Name,
+				Spec:       &specCopy,
+				SkipReason: fmt.Sprintf("prebuilt image %s", svc.Image),
+			})
+			continue
+		}
+		if svc.Remote {
+			targets = append(targets, build.ServiceBuildTarget{
+				Name:       svc.Name,
+				Spec:       &specCopy,
+				SkipReason: "remote build context not supported",
+			})
+			continue
+		}
+		if strings.TrimSpace(specCopy.Image) == "" {
+			specCopy.Image = fmt.Sprintf("%s-%s:latest", proj.Name, transpile.SanitizeName(svc.Name))
+		}
+		targets = append(targets, build.ServiceBuildTarget{
+			Name: svc.Name,
+			Spec: &specCopy,
+		})
+	}
+
+	return executeMultiServiceBuild(cmd, proj.Name, "compose", targets, servicesFilter, imageTag, saveTag, progressOut)
+}
+
+func runMultiServiceDiscoverBuild(cmd *cobra.Command, servicesFilter []string, imageTag string, saveTag bool) error {
+	builder := newCNBBuilder()
+	ctx := context.Background()
+
+	discovered, err := builder.DiscoverServices(ctx, ".", 2)
+	if err != nil {
+		return err
+	}
+	if len(discovered) == 0 {
+		return fmt.Errorf("nothing to build: no skipper.yaml, compose file, or recognizable source found (searched 2 levels deep); run 'skipper init' or 'skipper import compose'")
+	}
+
+	progressOut := cmd.OutOrStdout()
+	if outputFormat == "json" {
+		progressOut = cmd.ErrOrStderr()
+	}
+
+	absRoot, err := filepath.Abs(".")
+	if err != nil {
+		absRoot = "."
+	}
+	projectName := transpile.SanitizeName(filepath.Base(absRoot))
+
+	fmt.Fprintf(progressOut, "==> Discovered %d service(s) in %s\n", len(discovered), absRoot)
+
+	targets := make([]build.ServiceBuildTarget, 0, len(discovered))
+	for _, svc := range discovered {
+		fullName := fmt.Sprintf("%s-%s", projectName, svc.Name)
+		targets = append(targets, build.ServiceBuildTarget{
+			Name: svc.Name,
+			Spec: &config.AppSpec{
+				Version: "v1alpha1",
+				Name:    fullName,
+				Image:   fmt.Sprintf("%s:latest", fullName),
+				Build: config.BuildConfig{
+					Context: svc.Path,
+				},
+			},
+		})
+	}
+
+	return executeMultiServiceBuild(cmd, projectName, "discover", targets, servicesFilter, imageTag, saveTag, progressOut)
+}
+
+func executeMultiServiceBuild(cmd *cobra.Command, projectName, mode string, targets []build.ServiceBuildTarget, servicesFilter []string, imageTag string, saveTag bool, progressOut io.Writer) error {
+	if saveTag {
+		return fmt.Errorf("--save is not supported in %s mode (no skipper.yaml target)", mode)
+	}
+
+	if len(servicesFilter) > 0 {
+		avail := make([]string, 0, len(targets))
+		targetByName := make(map[string]bool, len(targets))
+		for _, t := range targets {
+			avail = append(avail, t.Name)
+			targetByName[t.Name] = true
+		}
+		wanted := make(map[string]bool, len(servicesFilter))
+		for _, raw := range servicesFilter {
+			name := strings.TrimSpace(raw)
+			if name == "" {
+				continue
+			}
+			if !targetByName[name] {
+				return fmt.Errorf("unknown service %q; available services: %s", name, strings.Join(avail, ", "))
+			}
+			wanted[name] = true
+		}
+		if len(wanted) > 0 {
+			filtered := make([]build.ServiceBuildTarget, 0, len(wanted))
+			for _, t := range targets {
+				if wanted[t.Name] {
+					filtered = append(filtered, t)
+				}
+			}
+			targets = filtered
+		}
+	}
+
+	if strings.TrimSpace(imageTag) != "" {
+		if len(targets) != 1 {
+			return fmt.Errorf("--tag can only be used when building a single service (got %d targets; use --service to select one)", len(targets))
+		}
+		if targets[0].Spec != nil {
+			targets[0].Spec.Image = strings.TrimSpace(imageTag)
+		}
+	}
+
+	builder := newCNBBuilder()
+	results := builder.BuildAll(context.Background(), targets, progressOut)
+
+	if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
+		for _, res := range results {
+			if res.Status == "built" {
+				_ = ledger.RecordTelemetryEvent(&opmem.CausalEvent{
+					Timestamp:   time.Now(),
+					Type:        "MUTATION",
+					Source:      "app build",
+					Description: fmt.Sprintf("Built and tagged OCI image %s for service %s", res.Image, res.Service),
+					Severity:    "INFO",
+				})
+			}
+		}
+	}
+
+	failedCount := 0
+	for _, res := range results {
+		if res.Status == "failed" {
+			failedCount++
+		}
+	}
+
+	out := cmd.OutOrStdout()
+	if outputFormat == "json" {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		enc.SetEscapeHTML(false)
+		payload := struct {
+			Project string                     `json:"project"`
+			Mode    string                     `json:"mode"`
+			Results []build.ServiceBuildResult `json:"results"`
+		}{
+			Project: projectName,
+			Mode:    mode,
+			Results: results,
+		}
+		if err := enc.Encode(payload); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(out, "\n%-20s %-10s %-36s %s\n", "SERVICE", "STATUS", "IMAGE", "DURATION")
+		for _, res := range results {
+			durStr := fmt.Sprintf("%dms", res.DurationMs)
+			if res.Status == "skipped" {
+				durStr = "-"
+			}
+			fmt.Fprintf(out, "%-20s %-10s %-36s %s\n", res.Service, res.Status, res.Image, durStr)
+			if res.Error != "" {
+				fmt.Fprintf(out, "  error: %s\n", res.Error)
+			}
+		}
+	}
+
+	if failedCount > 0 {
+		return fmt.Errorf("%d of %d services failed to build", failedCount, len(results))
+	}
+	return nil
 }
 
 func newDeployCmd() *cobra.Command {
@@ -1226,17 +1463,21 @@ func newImportCmd() *cobra.Command {
 		Short: "Import existing configuration formats into skipper.yaml",
 	}
 
+	var targetService string
 	composeCmd := &cobra.Command{
 		Use:   "compose [path-to-docker-compose.yaml]",
 		Short: "Transpile a docker-compose.yaml file into skipper.yaml",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			file := "docker-compose.yaml"
+			var file string
+			var err error
 			if len(args) > 0 {
 				file = args[0]
-			}
-			if _, err := os.Stat(file); os.IsNotExist(err) {
-				file = "compose.yaml"
+			} else {
+				file, err = transpile.FindComposeFile(".")
+				if err != nil {
+					return fmt.Errorf("unable to read compose file: %w", err)
+				}
 			}
 
 			data, err := os.ReadFile(file)
@@ -1245,7 +1486,7 @@ func newImportCmd() *cobra.Command {
 			}
 
 			transpiler := transpile.NewTranspiler()
-			spec, err := transpiler.TranspileCompose(data, "")
+			spec, err := transpiler.TranspileCompose(data, targetService)
 			if err != nil {
 				return fmt.Errorf("transpilation failed: %w", err)
 			}
@@ -1260,9 +1501,23 @@ func newImportCmd() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "==> Successfully transpiled '%s' into '%s' (Service: %s)!\n", file, targetFile, spec.Name)
+
+			if targetService == "" {
+				var cf transpile.ComposeFile
+				if yaml.Unmarshal(data, &cf) == nil && len(cf.Services) > 1 {
+					names := make([]string, 0, len(cf.Services))
+					for name := range cf.Services {
+						names = append(names, name)
+					}
+					sort.Strings(names)
+					fmt.Fprintf(cmd.OutOrStdout(), "Note: Compose file has %d services (%s); imported '%s'. Use --service to choose, or run 'skipper build' directly for all services.\n",
+						len(names), strings.Join(names, ", "), spec.Name)
+				}
+			}
 			return nil
 		},
 	}
+	composeCmd.Flags().StringVar(&targetService, "service", "", "Specific service in the Compose file to transpile")
 
 	importCmd.AddCommand(composeCmd)
 	return importCmd

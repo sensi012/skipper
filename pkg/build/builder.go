@@ -56,6 +56,14 @@ func NewCNBBuilder() *CNBBuilder {
 	}
 }
 
+// NewCNBBuilderWithRunner creates a CNBBuilder with a custom command runner for testing.
+func NewCNBBuilderWithRunner(r func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error) *CNBBuilder {
+	return &CNBBuilder{
+		DefaultBuilder: "paketobuildpacks/builder:base",
+		runCmd:         r,
+	}
+}
+
 func (b *CNBBuilder) execCmd(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
 	if b.runCmd != nil {
 		return b.runCmd(ctx, stdin, stdout, stderr, name, args...)
@@ -183,6 +191,22 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 		targetTag = fmt.Sprintf("%s:latest", spec.Name)
 	}
 
+	if detection.Runtime == RuntimeUnknown && spec.Build.Dockerfile == "" {
+		absDir, absErr := filepath.Abs(sourceDir)
+		if absErr != nil {
+			absDir = sourceDir
+		}
+		baseMsg := fmt.Sprintf("no Dockerfile or supported stack marker (go.mod, package.json, requirements.txt, pyproject.toml, Cargo.toml, pom.xml, build.gradle) found in %q", absDir)
+		if subServices, discErr := b.DiscoverServices(ctx, sourceDir, 2); discErr == nil && len(subServices) > 0 {
+			parts := make([]string, 0, len(subServices))
+			for _, svc := range subServices {
+				parts = append(parts, fmt.Sprintf("%s (%s)", svc.Name, svc.Runtime))
+			}
+			return "", fmt.Errorf("%s; found subfolder services: %s — run 'skipper build --discover', or run from the repo root with a compose file", baseMsg, strings.Join(parts, ", "))
+		}
+		return "", fmt.Errorf("%s", baseMsg)
+	}
+
 	_, _ = fmt.Fprintf(out, "==> Auto-detected stack: [%s] (Files: %s)\n", detection.Runtime, strings.Join(detection.FilesFound, ", "))
 
 	// Check if pack CLI is available
@@ -207,8 +231,15 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 		if spec.Build.Dockerfile != "" {
 			dockerfile = spec.Build.Dockerfile
 		}
+		dfPath := dockerfile
+		if !filepath.IsAbs(dfPath) {
+			dfPath = filepath.Join(sourceDir, dockerfile)
+		}
 		_, _ = fmt.Fprintf(out, "==> Building OCI image via Docker BuildKit with %s...\n", dockerfile)
-		buildArgs := []string{"build", "-t", targetTag, "-f", filepath.Join(sourceDir, dockerfile)}
+		buildArgs := []string{"build", "-t", targetTag, "-f", dfPath}
+		if strings.TrimSpace(spec.Build.Target) != "" {
+			buildArgs = append(buildArgs, "--target", strings.TrimSpace(spec.Build.Target))
+		}
 		buildArgs = appendBuildArgFlags(buildArgs, spec.Build.Args)
 		buildArgs = append(buildArgs, sourceDir)
 		if err := b.execCmd(ctx, nil, out, out, "docker", buildArgs...); err != nil {
@@ -225,6 +256,9 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 	}
 
 	buildArgs := []string{"build", "-t", targetTag, "-f", "-"}
+	if strings.TrimSpace(spec.Build.Target) != "" {
+		buildArgs = append(buildArgs, "--target", strings.TrimSpace(spec.Build.Target))
+	}
 	buildArgs = appendBuildArgFlags(buildArgs, spec.Build.Args)
 	buildArgs = append(buildArgs, sourceDir)
 	if err := b.execCmd(ctx, strings.NewReader(synthDockerfile), out, out, "docker", buildArgs...); err != nil {

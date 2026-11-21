@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sensi012/skipper/pkg/build"
 	"github.com/sensi012/skipper/pkg/doctor"
 	"github.com/sensi012/skipper/pkg/governance"
 )
@@ -754,6 +757,49 @@ func TestImportComposeCmd(t *testing.T) {
 			t.Errorf("expected output to mention compose.yaml, got: %s", out)
 		}
 	})
+
+	t.Run("finds docker-compose.yml, supports --service, and prints multi-service note", func(t *testing.T) {
+		resetGlobals(t)
+		dir := chdirTemp(t)
+		composeContent := `services:
+  db:
+    image: postgres:16
+  backend:
+    build: ./backend
+    ports:
+      - "8080:8080"
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+`
+		if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		out, _, err := executeCLI(t, "import", "compose")
+		if err != nil {
+			t.Fatalf("import compose failed: %v", err)
+		}
+		if !strings.Contains(out, "docker-compose.yml") || !strings.Contains(out, "Service: backend") {
+			t.Errorf("expected docker-compose.yml and deterministic buildable service backend, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Compose file has 3 services") || !strings.Contains(out, "--service") {
+			t.Errorf("expected multi-service note in output, got:\n%s", out)
+		}
+
+		// Explicit --service picks frontend
+		out, _, err = executeCLI(t, "import", "compose", "--service", "frontend")
+		if err != nil {
+			t.Fatalf("import compose --service frontend failed: %v", err)
+		}
+		if !strings.Contains(out, "Service: frontend") {
+			t.Errorf("expected Service: frontend, got:\n%s", out)
+		}
+		if strings.Contains(out, "Compose file has") {
+			t.Errorf("did not expect multi-service note when --service is explicitly set, got:\n%s", out)
+		}
+	})
 }
 
 func TestSBOMCmd(t *testing.T) {
@@ -1171,4 +1217,250 @@ func TestRightsizeCmd(t *testing.T) {
 	if parsed["dataSource"] != "prometheus" {
 		t.Errorf("expected dataSource=prometheus, got %+v", parsed)
 	}
+}
+
+func withFakeBuilder(t *testing.T, fn func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error) {
+	t.Helper()
+	orig := newCNBBuilder
+	newCNBBuilder = func() *build.CNBBuilder {
+		return build.NewCNBBuilderWithRunner(fn)
+	}
+	t.Cleanup(func() {
+		newCNBBuilder = orig
+	})
+}
+
+func setupThreeTierDir(t *testing.T) string {
+	t.Helper()
+	dir := chdirTemp(t)
+	_ = os.MkdirAll(filepath.Join(dir, "frontend"), 0755)
+	_ = os.MkdirAll(filepath.Join(dir, "backend"), 0755)
+	_ = os.WriteFile(filepath.Join(dir, "frontend", "Dockerfile"), []byte("FROM nginx:alpine\n"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "backend", "go.mod"), []byte("module example.com/backend\n\ngo 1.25\n"), 0644)
+
+	composeYAML := `services:
+  db:
+    image: postgres:16-alpine
+  backend:
+    build: ./backend
+    depends_on:
+      - db
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+`
+	_ = os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(composeYAML), 0644)
+	return dir
+}
+
+func TestBuildCmdMultiServiceModes(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+
+	t.Run("compose auto mode builds buildable services and skips prebuilt image", func(t *testing.T) {
+		resetGlobals(t)
+		setupThreeTierDir(t)
+
+		var builtTags []string
+		withFakeBuilder(t, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+			if name == "pack" {
+				return errors.New("no pack")
+			}
+			for i := 0; i < len(args)-1; i++ {
+				if args[i] == "-t" {
+					builtTags = append(builtTags, args[i+1])
+				}
+			}
+			return nil
+		})
+
+		out, _, err := executeCLI(t, "build")
+		if err != nil {
+			t.Fatalf("build in compose auto mode failed: %v\n%s", err, out)
+		}
+		if len(builtTags) != 2 {
+			t.Fatalf("expected 2 docker builds (backend, frontend), got %v", builtTags)
+		}
+		if !strings.Contains(out, "db") || !strings.Contains(out, "skipped") {
+			t.Errorf("expected summary table with skipped db service, got:\n%s", out)
+		}
+		if !strings.Contains(out, "backend") || !strings.Contains(out, "frontend") {
+			t.Errorf("expected backend and frontend in summary, got:\n%s", out)
+		}
+	})
+
+	t.Run("--service filter and unknown service error", func(t *testing.T) {
+		resetGlobals(t)
+		setupThreeTierDir(t)
+
+		var builtTags []string
+		withFakeBuilder(t, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+			if name == "pack" {
+				return errors.New("no pack")
+			}
+			for i := 0; i < len(args)-1; i++ {
+				if args[i] == "-t" {
+					builtTags = append(builtTags, args[i+1])
+				}
+			}
+			return nil
+		})
+
+		out, _, err := executeCLI(t, "build", "--service", "backend", "--tag", "custom-api:v2")
+		if err != nil {
+			t.Fatalf("build --service backend --tag failed: %v\n%s", err, out)
+		}
+		if len(builtTags) != 1 || builtTags[0] != "custom-api:v2" {
+			t.Fatalf("expected single build tagged custom-api:v2, got %v", builtTags)
+		}
+
+		// Unknown service lists available services
+		resetGlobals(t)
+		_, _, err = executeCLI(t, "build", "--service", "nonexistent")
+		if err == nil || !strings.Contains(err.Error(), "unknown service") || !strings.Contains(err.Error(), "backend") {
+			t.Fatalf("expected unknown service error listing available services, got: %v", err)
+		}
+	})
+
+	t.Run("discover mode without compose or skipper.yaml", func(t *testing.T) {
+		resetGlobals(t)
+		dir := setupThreeTierDir(t)
+		_ = os.Remove(filepath.Join(dir, "docker-compose.yml"))
+
+		var builtTags []string
+		withFakeBuilder(t, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+			if name == "pack" {
+				return errors.New("no pack")
+			}
+			for i := 0; i < len(args)-1; i++ {
+				if args[i] == "-t" {
+					builtTags = append(builtTags, args[i+1])
+				}
+			}
+			return nil
+		})
+
+		out, _, err := executeCLI(t, "build")
+		if err != nil {
+			t.Fatalf("discover mode build failed: %v\n%s", err, out)
+		}
+		if len(builtTags) != 2 {
+			t.Fatalf("expected 2 discovered builds, got %v", builtTags)
+		}
+		if !strings.Contains(out, "Discovered 2 service(s)") {
+			t.Errorf("expected discovery header in output, got:\n%s", out)
+		}
+
+		// Empty dir returns clear guidance error
+		resetGlobals(t)
+		chdirTemp(t)
+		_, _, err = executeCLI(t, "build")
+		if err == nil || !strings.Contains(err.Error(), "nothing to build") {
+			t.Fatalf("expected nothing to build error, got: %v", err)
+		}
+	})
+
+	t.Run("--tag with multiple targets and --save in compose mode return errors", func(t *testing.T) {
+		resetGlobals(t)
+		setupThreeTierDir(t)
+		withFakeBuilder(t, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+			return nil
+		})
+
+		_, _, err := executeCLI(t, "build", "--tag", "one-tag:latest")
+		if err == nil || !strings.Contains(err.Error(), "--tag can only be used when building a single service") {
+			t.Fatalf("expected --tag multi-target error, got: %v", err)
+		}
+
+		resetGlobals(t)
+		_, _, err = executeCLI(t, "build", "--save")
+		if err == nil || !strings.Contains(err.Error(), "--save is not supported") {
+			t.Fatalf("expected --save unsupported error, got: %v", err)
+		}
+	})
+
+	t.Run("json output parses cleanly", func(t *testing.T) {
+		resetGlobals(t)
+		setupThreeTierDir(t)
+		withFakeBuilder(t, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+			if name == "pack" {
+				return errors.New("no pack")
+			}
+			return nil
+		})
+
+		out, _, err := executeCLI(t, "build", "--format", "json")
+		if err != nil {
+			t.Fatalf("build --format json failed: %v\n%s", err, out)
+		}
+		var payload struct {
+			Project string                     `json:"project"`
+			Mode    string                     `json:"mode"`
+			Results []build.ServiceBuildResult `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(out), &payload); err != nil {
+			t.Fatalf("build --format json returned invalid JSON: %v\noutput:\n%s", err, out)
+		}
+		if payload.Mode != "compose" || len(payload.Results) != 3 {
+			t.Errorf("unexpected JSON payload: %+v", payload)
+		}
+	})
+
+	t.Run("failing service returns non-zero error while building others", func(t *testing.T) {
+		resetGlobals(t)
+		setupThreeTierDir(t)
+		withFakeBuilder(t, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+			if name == "pack" {
+				return errors.New("no pack")
+			}
+			if strings.Contains(strings.Join(args, " "), "backend") {
+				return errors.New("compile failed")
+			}
+			return nil
+		})
+
+		out, _, err := executeCLI(t, "build")
+		if err == nil || !strings.Contains(err.Error(), "1 of 3 services failed to build") {
+			t.Fatalf("expected '1 of 3 services failed to build' error, got: %v", err)
+		}
+		if !strings.Contains(out, "frontend") || !strings.Contains(out, "built") {
+			t.Errorf("expected frontend to still build after backend failure, got:\n%s", out)
+		}
+	})
+
+	t.Run("single-service skipper.yaml behavior unchanged and rejects --service", func(t *testing.T) {
+		resetGlobals(t)
+		dir := chdirTemp(t)
+		_ = os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM alpine\n"), 0644)
+		_ = os.WriteFile(filepath.Join(dir, "skipper.yaml"), []byte(sampleCompliantSpec), 0644)
+
+		var builtTag string
+		withFakeBuilder(t, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+			if name == "pack" {
+				return errors.New("no pack")
+			}
+			for i := 0; i < len(args)-1; i++ {
+				if args[i] == "-t" {
+					builtTag = args[i+1]
+				}
+			}
+			return nil
+		})
+
+		out, _, err := executeCLI(t, "build")
+		if err != nil {
+			t.Fatalf("single-service build failed: %v\n%s", err, out)
+		}
+		if builtTag != "ghcr.io/acme/demo-service:1.2.3" {
+			t.Errorf("expected single-service tag ghcr.io/acme/demo-service:1.2.3, got %q", builtTag)
+		}
+
+		resetGlobals(t)
+		_, _, err = executeCLI(t, "build", "--service", "web")
+		if err == nil || !strings.Contains(err.Error(), "--service requires compose or discover mode") {
+			t.Fatalf("expected --service requires compose or discover mode error, got: %v", err)
+		}
+	})
 }

@@ -23,6 +23,7 @@ type BuildConfig struct {
 	Builder    string            `yaml:"builder,omitempty" json:"builder,omitempty"`
 	Dockerfile string            `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"`
 	Args       map[string]string `yaml:"args,omitempty" json:"args,omitempty"`
+	Target     string            `yaml:"target,omitempty" json:"target,omitempty"`
 }
 
 type RuntimeConfig struct {

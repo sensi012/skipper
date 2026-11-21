@@ -1,0 +1,35 @@
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - target: 80
+        published: "8080"
+        protocol: tcp
+    depends_on:
+      - backend
+
+  backend:
+    image: ${REGISTRY:-local}/shop-api:${TAG:-dev}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+      target: prod
+      args:
+        - BUILD_ENV=production
+        - TAG
+        - UNSET_ARG
+    ports:
+      - "127.0.0.1:8081:8080/tcp"
+    environment:
+      - LOG_LEVEL=info
+      - FEATURE_FLAG
+    depends_on:
+      db:
+        condition: service_started
+
+  db:
+    image: postgres:16
+    volumes:
+      - type: volume
+        source: pgdata
+        target: /var/lib/postgresql/data

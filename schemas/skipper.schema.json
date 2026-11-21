@@ -33,6 +33,7 @@
         "context": { "type": "string", "default": "." },
         "builder": { "type": "string" },
         "dockerfile": { "type": "string" },
+        "target": { "type": "string" },
         "args": {
           "type": "object",
           "additionalProperties": { "type": "string" }
