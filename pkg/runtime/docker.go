@@ -119,7 +119,15 @@ func normalizeDockerCPU(raw string) string {
 }
 
 func buildDockerRunArgs(spec *config.AppSpec) []string {
+	return buildDockerRunArgsWithDeps(spec, "", nil)
+}
+
+func buildDockerRunArgsWithDeps(spec *config.AppSpec, networkName string, extraEnv []config.EnvVar) []string {
 	args := []string{"run", "-d", "--name", spec.Name}
+
+	if networkName != "" {
+		args = append(args, "--network", networkName)
+	}
 
 	for _, ep := range spec.Endpoints {
 		mapping := fmt.Sprintf("%d:%d", ep.Port, ep.Port)
@@ -129,9 +137,18 @@ func buildDockerRunArgs(spec *config.AppSpec) []string {
 		args = append(args, "-p", mapping)
 	}
 
+	existingEnv := make(map[string]bool, len(spec.Env))
 	for _, env := range spec.Env {
+		existingEnv[env.Name] = true
 		if env.Value != "" {
 			args = append(args, "-e", fmt.Sprintf("%s=%s", env.Name, env.Value))
+		}
+	}
+
+	for _, env := range extraEnv {
+		if !existingEnv[env.Name] && env.Value != "" {
+			args = append(args, "-e", fmt.Sprintf("%s=%s", env.Name, env.Value))
+			existingEnv[env.Name] = true
 		}
 	}
 
@@ -181,11 +198,52 @@ func (d *DockerAdapter) Deploy(ctx context.Context, spec *config.AppSpec) (*Work
 		return nil, fmt.Errorf("app spec with a non-empty name is required")
 	}
 
+	var networkName string
+	var extraEnv []config.EnvVar
+
+	if len(spec.Dependencies.Services) > 0 {
+		resolved := make([]resolvedDependency, 0, len(spec.Dependencies.Services))
+		for _, dep := range spec.Dependencies.Services {
+			if strings.TrimSpace(dep.Name) == "" {
+				return nil, fmt.Errorf("service dependency name must not be empty")
+			}
+			img, port, env, err := ResolveDependencyPreset(spec.Name, dep)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve dependency %s: %w", dep.Name, err)
+			}
+			resolved = append(resolved, resolvedDependency{
+				name:  dep.Name,
+				image: img,
+				port:  port,
+				env:   env,
+			})
+		}
+
+		networkName = DockerNetworkName(spec.Name)
+		netOut, err := d.command(ctx, "docker", "network", "create", networkName).CombinedOutput()
+		if err != nil && !strings.Contains(strings.ToLower(string(netOut)), "already exists") {
+			return nil, fmt.Errorf("failed to create docker network %s: %w: %s", networkName, err, strings.TrimSpace(string(netOut)))
+		}
+
+		for i, dep := range spec.Dependencies.Services {
+			depContainer := fmt.Sprintf("%s-%s", spec.Name, dep.Name)
+			_ = d.command(ctx, "docker", "rm", "-f", depContainer).Run()
+
+			depArgs := buildDependencyRunArgs(spec.Name, networkName, dep, resolved[i].image, resolved[i].env)
+			depOut, err := d.command(ctx, "docker", depArgs...).CombinedOutput()
+			if err != nil {
+				return nil, fmt.Errorf("failed to start dependency %s: %w: %s", dep.Name, err, strings.TrimSpace(string(depOut)))
+			}
+		}
+
+		extraEnv = buildDependencyEnvVars(resolved)
+	}
+
 	// 1. Remove existing container if running
 	_ = d.command(ctx, "docker", "rm", "-f", spec.Name).Run()
 
 	// 2. Build docker run arguments
-	args := buildDockerRunArgs(spec)
+	args := buildDockerRunArgsWithDeps(spec, networkName, extraEnv)
 
 	cmd := d.command(ctx, "docker", args...)
 	out, err := cmd.CombinedOutput()
@@ -237,7 +295,29 @@ func (d *DockerAdapter) Status(ctx context.Context, workloadName string) (*Workl
 
 func (d *DockerAdapter) Stop(ctx context.Context, workloadName string) error {
 	cmd := d.command(ctx, "docker", "stop", workloadName)
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	// Best-effort cleanup of any dependency containers labeled with skipper.parent=<workloadName>
+	out, err := d.command(ctx, "docker", "ps", "-aq", "--filter", fmt.Sprintf("label=skipper.parent=%s", workloadName)).Output()
+	if err == nil {
+		var depIDs []string
+		for _, line := range strings.Split(string(out), "\n") {
+			if id := strings.TrimSpace(line); id != "" {
+				depIDs = append(depIDs, id)
+			}
+		}
+		if len(depIDs) > 0 {
+			rmArgs := append([]string{"rm", "-f"}, depIDs...)
+			_ = d.command(ctx, "docker", rmArgs...).Run()
+		}
+	}
+
+	// Best-effort removal of the app's local dependency bridge network
+	_ = d.command(ctx, "docker", "network", "rm", DockerNetworkName(workloadName)).Run()
+
+	return nil
 }
 
 func (d *DockerAdapter) Logs(ctx context.Context, workloadName string, opts LogOptions, out io.Writer) error {

@@ -17,6 +17,7 @@ import (
 	"github.com/sensi012/skipper/pkg/doctor"
 	"github.com/sensi012/skipper/pkg/governance"
 	"github.com/sensi012/skipper/pkg/opmem"
+	"github.com/sensi012/skipper/pkg/rollout"
 	"github.com/sensi012/skipper/pkg/security"
 	"github.com/sensi012/skipper/pkg/synthesizer"
 	"gopkg.in/yaml.v3"
@@ -68,18 +69,23 @@ func NewMCPServer() *MCPServer {
 
 	// 6. Tool: skipper_rightsize
 	rightsizeTool := mcp.NewTool("skipper_rightsize",
-		mcp.WithDescription("Analyzes workload resource allocations vs actual P95 utilization to calculate monthly cloud cost savings"),
+		mcp.WithDescription("Analyzes workload resource allocations vs actual P95 utilization (Prometheus, kubectl top, or baseline) to calculate monthly cloud cost savings"),
 		mcp.WithString("configPath", mcp.Description("Path to skipper.yaml")),
+		mcp.WithString("namespace", mcp.Description("Target Kubernetes namespace (default: default)")),
+		mcp.WithString("prometheusUrl", mcp.Description("Optional Prometheus HTTP endpoint for live P95 metrics")),
+		mcp.WithBoolean("useKubectlTop", mcp.Description("Query live pod metrics via kubectl top")),
 	)
 	s.AddTool(rightsizeTool, handleRightsize)
 
 	// 7. Tool: skipper_rollback
 	rollbackTool := mcp.NewTool("skipper_rollback",
-		mcp.WithDescription("Triggers a deterministic workload rollback and records the mutation in operational memory"),
+		mcp.WithDescription("Executes or dry-runs a Kubernetes deployment rollback (kubectl rollout undo) and records the mutation in operational memory"),
 		mcp.WithString("workload", mcp.Required(), mcp.Description("Workload name to roll back")),
-		mcp.WithString("revision", mcp.Description("Target revision or version tag (default: previous)")),
+		mcp.WithString("revision", mcp.Description("Target revision number or 'previous' (default: previous)")),
 		mcp.WithString("reason", mcp.Description("Reason for triggering rollback")),
 		mcp.WithString("namespace", mcp.Description("Target Kubernetes namespace (default: default)")),
+		mcp.WithString("context", mcp.Description("Optional kubeconfig context name")),
+		mcp.WithBoolean("dryRun", mcp.Description("Preview kubectl rollout undo command without executing (default: true for safety)")),
 	)
 	s.AddTool(rollbackTool, handleRollback)
 
@@ -202,6 +208,9 @@ func handleDiagnose(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 
 func handleRightsize(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	cfgPath := request.GetString("configPath", "skipper.yaml")
+	ns := request.GetString("namespace", "default")
+	promURL := strings.TrimSpace(request.GetString("prometheusUrl", ""))
+	useTop := request.GetBool("useKubectlTop", false)
 
 	spec, err := readSpec(cfgPath)
 	if err != nil {
@@ -209,7 +218,11 @@ func handleRightsize(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 	}
 
 	gov := governance.NewGovernanceEngine()
-	res, err := gov.AnalyzeRightsizing(ctx, spec)
+	res, err := gov.AnalyzeRightsizingWithOptions(ctx, spec, governance.RightsizingOptions{
+		Namespace:     ns,
+		PrometheusURL: promURL,
+		UseKubectlTop: useTop,
+	})
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -218,17 +231,8 @@ func handleRightsize(ctx context.Context, request mcp.CallToolRequest) (*mcp.Cal
 	return mcp.NewToolResultText(string(data)), nil
 }
 
-// RollbackResult represents the structured output of skipper_rollback.
-type RollbackResult struct {
-	Workload       string    `json:"workload"`
-	Namespace      string    `json:"namespace"`
-	TargetRevision string    `json:"targetRevision"`
-	Reason         string    `json:"reason"`
-	Status         string    `json:"status"`
-	ChangeID       string    `json:"changeId"`
-	Timestamp      time.Time `json:"timestamp"`
-	RecordedInMem  bool      `json:"recordedInOperationalMemory"`
-}
+// RollbackResult aliases rollout.RollbackResult for structured JSON MCP responses.
+type RollbackResult = rollout.RollbackResult
 
 // IncidentReport represents the correlated output of skipper_investigate_incident.
 type IncidentReport struct {
@@ -260,50 +264,21 @@ func handleRollback(ctx context.Context, request mcp.CallToolRequest) (*mcp.Call
 	if ns == "" {
 		ns = "default"
 	}
+	ctxName := strings.TrimSpace(request.GetString("context", ""))
+	dryRun := request.GetBool("dryRun", true)
 
-	now := time.Now().UTC()
-	changeID := fmt.Sprintf("rb-%d", now.UnixNano())
-	recorded := false
-
-	if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
-		errChg := ledger.RecordChange(&opmem.ChangeRecord{
-			ID:        changeID,
-			Timestamp: now,
-			Actor: opmem.ChangeActor{
-				Type:       "ai-agent",
-				Identifier: "skipper-mcp",
-			},
-			TargetWorkload: opmem.TargetWorkload{
-				Namespace: ns,
-				Name:      workload,
-				Kind:      "Deployment",
-			},
-			ChangeType: "rollback",
-			Diff: map[string]interface{}{
-				"targetRevision": revision,
-				"reason":         reason,
-				"status":         "ROLLED_BACK",
-			},
-		})
-		errEvt := ledger.RecordTelemetryEvent(&opmem.CausalEvent{
-			Timestamp:   now,
-			Type:        "MUTATION",
-			Source:      "skipper_rollback",
-			Description: fmt.Sprintf("Rolled back workload %s (ns=%s) to revision %s: %s", workload, ns, revision, reason),
-			Severity:    "WARN",
-		})
-		recorded = errChg == nil && errEvt == nil
-	}
-
-	res := RollbackResult{
-		Workload:       workload,
-		Namespace:      ns,
-		TargetRevision: revision,
-		Reason:         reason,
-		Status:         "ROLLED_BACK",
-		ChangeID:       changeID,
-		Timestamp:      now,
-		RecordedInMem:  recorded,
+	ledger, _ := opmem.NewOperationalMemoryLedger("")
+	mgr := rollout.NewRollbackManager(ledger)
+	res, err := mgr.Execute(ctx, rollout.RollbackOptions{
+		WorkloadName: workload,
+		Namespace:    ns,
+		Revision:     revision,
+		Reason:       reason,
+		ContextName:  ctxName,
+		DryRun:       dryRun,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	data, err := json.MarshalIndent(res, "", "  ")

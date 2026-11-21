@@ -22,6 +22,9 @@ jobs:
           - os: darwin
             arch: arm64
             binary: skipper-darwin-arm64
+          - os: darwin
+            arch: amd64
+            binary: skipper-darwin-amd64
           - os: windows
             arch: amd64
             binary: skipper-windows-amd64.exe
@@ -65,8 +68,16 @@ jobs:
           path: release-artifacts
           merge-multiple: true
 
+      - name: Generate SHA256 Checksums
+        working-directory: release-artifacts
+        run: |
+          sha256sum skipper-* > checksums.txt
+          cat checksums.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/*
+          files: |
+            release-artifacts/skipper-*
+            release-artifacts/checksums.txt
           generate_release_notes: true

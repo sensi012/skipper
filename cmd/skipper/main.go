@@ -83,6 +83,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newObserveCmd())
 	rootCmd.AddCommand(newGitOpsCmd())
 	rootCmd.AddCommand(newContextCmd())
+	rootCmd.AddCommand(newRollbackCmd())
 
 	return rootCmd
 }
@@ -517,7 +518,10 @@ func newDiagnoseCmd() *cobra.Command {
 }
 
 func newRightsizingCmd() *cobra.Command {
-	return &cobra.Command{
+	var promURL string
+	var useKubectlTop bool
+
+	cmd := &cobra.Command{
 		Use:   "rightsize",
 		Short: "Analyze workload CPU and memory usage to reclaim wasted cloud expenditure",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -528,26 +532,39 @@ func newRightsizingCmd() *cobra.Command {
 
 			gov := governance.NewGovernanceEngine()
 			ctx := context.Background()
-			res, err := gov.AnalyzeRightsizing(ctx, spec)
+			res, err := gov.AnalyzeRightsizingWithOptions(ctx, spec, governance.RightsizingOptions{
+				Namespace:     namespace,
+				PrometheusURL: promURL,
+				UseKubectlTop: useKubectlTop,
+			})
 			if err != nil {
 				return err
 			}
 
+			out := cmd.OutOrStdout()
 			if outputFormat == "json" {
-				enc := json.NewEncoder(os.Stdout)
+				enc := json.NewEncoder(out)
 				enc.SetIndent("", "  ")
 				return enc.Encode(res)
 			}
 
-			fmt.Printf("=== FINOPS WORKLOAD RIGHTSIZING ANALYSIS ===\n")
-			fmt.Printf("Workload:            %s (Namespace: %s)\n", res.WorkloadName, res.Namespace)
-			fmt.Printf("Allocated CPU:       %s (Actual P95: %s) -> Recommended: %s\n", res.RequestedCPU, res.ActualP95CPU, res.RecommendedCPU)
-			fmt.Printf("Allocated Memory:    %s (Actual P95: %s) -> Recommended: %s\n", res.RequestedMemory, res.ActualP95Memory, res.RecommendedMem)
-			fmt.Printf("Est. Monthly Saving: $%.2f USD / replica\n", res.MonthlySavings)
-			fmt.Printf("Status:              OVERPROVISIONED (Rightsizing available)\n")
+			fmt.Fprintf(out, "=== FINOPS WORKLOAD RIGHTSIZING ANALYSIS ===\n")
+			fmt.Fprintf(out, "Workload:            %s (Namespace: %s, Source: %s)\n", res.WorkloadName, res.Namespace, res.DataSource)
+			fmt.Fprintf(out, "Allocated CPU:       %s (Actual P95: %s) -> Recommended: %s\n", res.RequestedCPU, res.ActualP95CPU, res.RecommendedCPU)
+			fmt.Fprintf(out, "Allocated Memory:    %s (Actual P95: %s) -> Recommended: %s\n", res.RequestedMemory, res.ActualP95Memory, res.RecommendedMem)
+			fmt.Fprintf(out, "Est. Monthly Saving: $%.2f USD / replica\n", res.MonthlySavings)
+			if res.Overprovisioned {
+				fmt.Fprintf(out, "Status:              OVERPROVISIONED (Rightsizing available)\n")
+			} else {
+				fmt.Fprintf(out, "Status:              OPTIMAL (Well-sized)\n")
+			}
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&promURL, "prometheus-url", "", "Prometheus HTTP endpoint for live P95 CPU/memory queries")
+	cmd.Flags().BoolVar(&useKubectlTop, "live", false, "Query live pod metrics via 'kubectl top pod'")
+	return cmd
 }
 
 func newPolicyCmd() *cobra.Command {
@@ -1882,4 +1899,63 @@ func newContextCmd() *cobra.Command {
 	contextCmd.AddCommand(useCmd)
 	contextCmd.AddCommand(driftCmd)
 	return contextCmd
+}
+
+func newRollbackCmd() *cobra.Command {
+	var (
+		revision    string
+		reason      string
+		contextName string
+		dryRun      bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "rollback [workload]",
+		Short: "Roll back a Kubernetes deployment via kubectl rollout undo and record in operational memory",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			workloadName := ""
+			if len(args) > 0 {
+				workloadName = args[0]
+			} else if spec, err := loadSpec(); err == nil {
+				workloadName = spec.Name
+			}
+			if strings.TrimSpace(workloadName) == "" {
+				return fmt.Errorf("workload name required (pass positional arg or provide skipper.yaml)")
+			}
+
+			ledger, _ := opmem.NewOperationalMemoryLedger("")
+			mgr := rollout.NewRollbackManager(ledger)
+			res, err := mgr.Execute(context.Background(), rollout.RollbackOptions{
+				WorkloadName: workloadName,
+				Namespace:    namespace,
+				Revision:     revision,
+				Reason:       reason,
+				ContextName:  contextName,
+				DryRun:       dryRun,
+			})
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if outputFormat == "json" {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(res)
+			}
+
+			fmt.Fprintf(out, "==> Rollback [%s] for '%s' (ns=%s, revision=%s)\n", res.Status, res.Workload, res.Namespace, res.TargetRevision)
+			fmt.Fprintf(out, "    Command: %s\n", strings.Join(res.Command, " "))
+			if res.Output != "" {
+				fmt.Fprintf(out, "    Output:  %s\n", res.Output)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&revision, "revision", "previous", "Target revision number or 'previous'")
+	cmd.Flags().StringVar(&reason, "reason", "manual rollback via CLI", "Reason for rollback (recorded in operational memory)")
+	cmd.Flags().StringVar(&contextName, "context", "", "Optional kubeconfig context name")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview kubectl rollout undo command without executing")
+	return cmd
 }

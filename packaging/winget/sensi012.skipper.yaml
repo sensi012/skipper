@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+PackageIdentifier: sensi012.skipper
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: sensi012
+PublisherUrl: https://github.com/sensi012/skipper
+PublisherSupportUrl: https://github.com/sensi012/skipper/issues
+PackageName: Skipper
+PackageUrl: https://github.com/sensi012/skipper
+License: MIT
+LicenseUrl: https://github.com/sensi012/skipper/blob/master/LICENSE
+ShortDescription: Intent-first developer platform CLI for Docker and Kubernetes
+Tags:
+  - cli
+  - docker
+  - kubernetes
+  - platform-engineering
+  - devops
+InstallerType: portable
+Commands:
+  - skipper
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/sensi012/skipper/releases/download/v0.1.0/skipper-windows-amd64.exe
+    InstallerSha256: REPLACE_WITH_WINDOWS_AMD64_SHA256
+    NestedInstallerFiles:
+      - RelativeFilePath: skipper-windows-amd64.exe
+        PortableCommandAlias: skipper
+ManifestType: singleton
+ManifestVersion: 1.6.0

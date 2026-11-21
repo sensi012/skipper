@@ -1092,3 +1092,83 @@ func TestSecretSyncCmd(t *testing.T) {
 		t.Fatal("expected error for invalid sync direction")
 	}
 }
+
+func TestRollbackCmd(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+
+	// Missing workload without skipper.yaml
+	resetGlobals(t)
+	chdirTemp(t)
+	_, _, err := executeCLI(t, "rollback", "--dry-run")
+	if err == nil {
+		t.Fatal("expected error when workload name is missing")
+	}
+
+	// Dry-run text mode
+	resetGlobals(t)
+	out, _, err := executeCLI(t, "rollback", "payments-api", "-n", "prod", "--revision", "5", "--context", "prod-east", "--reason", "canary error spike", "--dry-run")
+	if err != nil {
+		t.Fatalf("rollback --dry-run failed: %v", err)
+	}
+	if !strings.Contains(out, "kubectl --context prod-east rollout undo deployment/payments-api -n prod --to-revision=5") {
+		t.Errorf("unexpected rollback output:\n%s", out)
+	}
+
+	// Dry-run JSON mode
+	resetGlobals(t)
+	out, _, err = executeCLI(t, "rollback", "payments-api", "--dry-run", "--format", "json")
+	if err != nil {
+		t.Fatalf("rollback --dry-run --format json failed: %v", err)
+	}
+	var res map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("invalid JSON from rollback: %v\n%s", err, out)
+	}
+	if res["status"] != "dry-run" || res["workload"] != "payments-api" {
+		t.Errorf("unexpected rollback JSON: %+v", res)
+	}
+}
+
+func TestRightsizeCmd(t *testing.T) {
+	resetGlobals(t)
+	dir := chdirTemp(t)
+	if err := os.WriteFile(filepath.Join(dir, "skipper.yaml"), []byte(sampleCompliantSpec), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Baseline text mode
+	out, _, err := executeCLI(t, "rightsize")
+	if err != nil {
+		t.Fatalf("rightsize failed: %v", err)
+	}
+	if !strings.Contains(out, "Source: baseline") || !strings.Contains(out, "demo-service") {
+		t.Errorf("unexpected baseline rightsize output:\n%s", out)
+	}
+
+	// Live Prometheus JSON mode
+	promSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query().Get("query")
+		if strings.Contains(q, "cpu") {
+			_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"value":[1700000000,"0.08"]}]}}`))
+		} else {
+			_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"value":[1700000000,"67108864"]}]}}`))
+		}
+	}))
+	defer promSrv.Close()
+
+	resetGlobals(t)
+	out, _, err = executeCLI(t, "rightsize", "--prometheus-url", promSrv.URL, "--format", "json")
+	if err != nil {
+		t.Fatalf("rightsize --prometheus-url failed: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("invalid JSON from rightsize: %v\n%s", err, out)
+	}
+	if parsed["dataSource"] != "prometheus" {
+		t.Errorf("expected dataSource=prometheus, got %+v", parsed)
+	}
+}

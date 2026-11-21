@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestAppSpecDefaults(t *testing.T) {
@@ -107,5 +109,68 @@ func TestAppSpecJSONRoundTrip(t *testing.T) {
 
 	if decoded.Name != spec.Name || !decoded.Security.RunAsNonRoot {
 		t.Fatalf("mismatch in decoded struct: %+v", decoded)
+	}
+}
+
+func TestServiceDependencyFieldsRoundTrip(t *testing.T) {
+	spec := AppSpec{
+		Version: "v1",
+		Name:    "orders-api",
+		Type:    "service",
+		Dependencies: DependenciesConfig{
+			Services: []ServiceDependency{
+				{
+					Name:     "db",
+					Required: true,
+					Type:     "postgres",
+					Port:     5432,
+					Env:      map[string]string{"POSTGRES_USER": "orders"},
+				},
+				{
+					Name:  "cache",
+					Type:  "custom",
+					Image: "valkey/valkey:8-alpine",
+					Port:  6379,
+				},
+				{
+					// Backward-compatible minimal entry
+					Name:      "auth",
+					Namespace: "core",
+				},
+			},
+		},
+	}
+
+	rawYAML, err := yaml.Marshal(spec)
+	if err != nil {
+		t.Fatalf("yaml.Marshal failed: %v", err)
+	}
+	var fromYAML AppSpec
+	if err := yaml.Unmarshal(rawYAML, &fromYAML); err != nil {
+		t.Fatalf("yaml.Unmarshal failed: %v", err)
+	}
+	if len(fromYAML.Dependencies.Services) != 3 {
+		t.Fatalf("expected 3 service deps, got %d", len(fromYAML.Dependencies.Services))
+	}
+	if fromYAML.Dependencies.Services[0].Type != "postgres" || fromYAML.Dependencies.Services[0].Env["POSTGRES_USER"] != "orders" {
+		t.Fatalf("unexpected postgres dep from YAML: %+v", fromYAML.Dependencies.Services[0])
+	}
+	if fromYAML.Dependencies.Services[1].Image != "valkey/valkey:8-alpine" || fromYAML.Dependencies.Services[1].Port != 6379 {
+		t.Fatalf("unexpected custom dep from YAML: %+v", fromYAML.Dependencies.Services[1])
+	}
+	if fromYAML.Dependencies.Services[2].Namespace != "core" || fromYAML.Dependencies.Services[2].Type != "" {
+		t.Fatalf("unexpected minimal dep from YAML: %+v", fromYAML.Dependencies.Services[2])
+	}
+
+	rawJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var fromJSON AppSpec
+	if err := json.Unmarshal(rawJSON, &fromJSON); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	if fromJSON.Dependencies.Services[0].Env["POSTGRES_USER"] != "orders" || fromJSON.Dependencies.Services[1].Image != "valkey/valkey:8-alpine" {
+		t.Fatalf("unexpected deps from JSON: %+v", fromJSON.Dependencies.Services)
 	}
 }

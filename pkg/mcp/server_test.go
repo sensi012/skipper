@@ -413,7 +413,7 @@ func TestMCPHandleRollback(t *testing.T) {
 		if err := json.Unmarshal([]byte(extractText(t, res)), &out); err != nil {
 			t.Fatalf("invalid JSON response: %v", err)
 		}
-		if out.Workload != "checkout-api" || out.TargetRevision != "rev-41" || out.Status != "ROLLED_BACK" || !out.RecordedInMem {
+		if out.Workload != "checkout-api" || out.TargetRevision != "rev-41" || out.Status != "dry-run" || !out.RecordedInMem || len(out.Command) == 0 {
 			t.Fatalf("unexpected rollback result: %+v", out)
 		}
 	})

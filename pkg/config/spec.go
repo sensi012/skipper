@@ -100,9 +100,13 @@ type DependenciesConfig struct {
 }
 
 type ServiceDependency struct {
-	Name      string `yaml:"name" json:"name"`
-	Namespace string `yaml:"namespace,omitempty" json:"namespace,omitempty"`
-	Required  bool   `yaml:"required,omitempty" json:"required,omitempty"`
+	Name      string            `yaml:"name" json:"name"`
+	Namespace string            `yaml:"namespace,omitempty" json:"namespace,omitempty"`
+	Required  bool              `yaml:"required,omitempty" json:"required,omitempty"`
+	Type      string            `yaml:"type,omitempty" json:"type,omitempty"`
+	Image     string            `yaml:"image,omitempty" json:"image,omitempty"`
+	Port      int               `yaml:"port,omitempty" json:"port,omitempty"`
+	Env       map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 type StorageDependency struct {
