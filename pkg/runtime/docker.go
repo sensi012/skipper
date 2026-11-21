@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -44,8 +45,10 @@ func (d *DockerAdapter) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// normalizeDockerMemory converts Kubernetes memory quantities (e.g. 512Mi, 1Gi, 256Ki, 2Ti)
-// into Docker CLI-compatible memory strings (e.g. 512m, 1g, 256k, 2048g).
+// normalizeDockerMemory converts Kubernetes memory quantities into Docker CLI-compatible
+// memory strings. Binary units (Ki/Mi/Gi/Ti) map 1:1 to Docker's k/m/g. Decimal units
+// (K/M/G) are rounded to the nearest binary k/m so local limits mirror production without
+// unreadable multi-digit byte strings (e.g. 500M -> 477m, 1G -> 954m).
 func normalizeDockerMemory(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -64,10 +67,31 @@ func normalizeDockerMemory(raw string) string {
 		}
 		return strings.TrimSuffix(s, "Ti") + "g"
 	case strings.HasSuffix(s, "K"):
+		if n, err := strconv.ParseFloat(strings.TrimSuffix(s, "K"), 64); err == nil && n > 0 {
+			kib := int64(math.Round(n * 1000.0 / 1024.0))
+			if kib < 1 {
+				kib = 1
+			}
+			return fmt.Sprintf("%dk", kib)
+		}
 		return strings.TrimSuffix(s, "K") + "k"
 	case strings.HasSuffix(s, "M"):
+		if n, err := strconv.ParseFloat(strings.TrimSuffix(s, "M"), 64); err == nil && n > 0 {
+			mib := int64(math.Round(n * 1e6 / (1024.0 * 1024.0)))
+			if mib < 1 {
+				mib = 1
+			}
+			return fmt.Sprintf("%dm", mib)
+		}
 		return strings.TrimSuffix(s, "M") + "m"
 	case strings.HasSuffix(s, "G"):
+		if n, err := strconv.ParseFloat(strings.TrimSuffix(s, "G"), 64); err == nil && n > 0 {
+			mib := int64(math.Round(n * 1e9 / (1024.0 * 1024.0)))
+			if mib < 1 {
+				mib = 1
+			}
+			return fmt.Sprintf("%dm", mib)
+		}
 		return strings.TrimSuffix(s, "G") + "g"
 	default:
 		return s
@@ -116,10 +140,10 @@ func buildDockerRunArgs(spec *config.AppSpec) []string {
 		args = append(args, "--security-opt=no-new-privileges:true")
 	}
 	if spec.Security.ReadOnlyRootFilesystem {
-		args = append(args, "--read-only")
+		args = append(args, "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid")
 	}
 
-	// Memory limits if set (normalize Kubernetes Mi/Gi/Ki units for Docker CLI)
+	// Memory limits if set (normalize Kubernetes Mi/Gi/Ki and decimal K/M/G units for Docker CLI)
 	if mem := normalizeDockerMemory(spec.Runtime.Resources.Memory.Limit); mem != "" {
 		args = append(args, "-m", mem)
 	}
@@ -127,6 +151,21 @@ func buildDockerRunArgs(spec *config.AppSpec) []string {
 	// CPU limits if set (normalize Kubernetes millicores e.g. 500m -> 0.5)
 	if cpus := normalizeDockerCPU(spec.Runtime.Resources.CPU.Limit); cpus != "" {
 		args = append(args, "--cpus", cpus)
+	}
+
+	// Translate Kubernetes liveness probe to Docker healthcheck
+	if spec.Health.Liveness != nil && strings.TrimSpace(spec.Health.Liveness.Path) != "" {
+		probePort := spec.Health.Liveness.Port
+		if probePort == 0 && len(spec.Endpoints) > 0 {
+			probePort = spec.Endpoints[0].Port
+		}
+		if probePort == 0 {
+			probePort = 8080
+		}
+		args = append(args, "--health-cmd", fmt.Sprintf("wget -qO- http://127.0.0.1:%d%s || exit 1", probePort, spec.Health.Liveness.Path))
+		if spec.Health.Liveness.PeriodSeconds > 0 {
+			args = append(args, "--health-interval", fmt.Sprintf("%ds", spec.Health.Liveness.PeriodSeconds))
+		}
 	}
 
 	targetImage := spec.Image

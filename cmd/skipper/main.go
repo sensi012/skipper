@@ -102,17 +102,21 @@ func getRuntimeAdapter() runtime.RuntimeEngine {
 	return runtime.NewDockerAdapter()
 }
 
-func loadSpec() (*config.AppSpec, error) {
-	configFile := appConfigFile
-	if configFile == "" {
-		if _, err := os.Stat("skipper.yaml"); err == nil {
-			configFile = "skipper.yaml"
-		} else if _, err := os.Stat("app.yaml"); err == nil {
-			configFile = "app.yaml"
-		} else {
-			configFile = "skipper.yaml"
-		}
+func resolveConfigPath() string {
+	if appConfigFile != "" {
+		return appConfigFile
 	}
+	if _, err := os.Stat("skipper.yaml"); err == nil {
+		return "skipper.yaml"
+	}
+	if _, err := os.Stat("app.yaml"); err == nil {
+		return "app.yaml"
+	}
+	return "skipper.yaml"
+}
+
+func loadSpec() (*config.AppSpec, error) {
+	configFile := resolveConfigPath()
 
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -127,6 +131,7 @@ func loadSpec() (*config.AppSpec, error) {
 
 func newBuildCmd() *cobra.Command {
 	var imageTag string
+	var saveTag bool
 	cmd := &cobra.Command{
 		Use:   "build",
 		Short: "Auto-detect stack and build OCI-compliant container image",
@@ -146,6 +151,19 @@ func newBuildCmd() *cobra.Command {
 				return err
 			}
 
+			if saveTag {
+				cfgPath := resolveConfigPath()
+				spec.Image = tag
+				outData, err := yaml.Marshal(spec)
+				if err != nil {
+					return fmt.Errorf("failed to serialize %s: %w", cfgPath, err)
+				}
+				if err := os.WriteFile(cfgPath, outData, 0644); err != nil {
+					return fmt.Errorf("failed to update %s: %w", cfgPath, err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "==> Saved image '%s' to %s\n", tag, cfgPath)
+			}
+
 			// Record build into operational memory
 			if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
 				_ = ledger.RecordTelemetryEvent(&opmem.CausalEvent{
@@ -162,12 +180,14 @@ func newBuildCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&imageTag, "tag", "t", "", "Override target OCI image tag (e.g. my-app:v1.0.0)")
+	cmd.Flags().BoolVar(&saveTag, "save", false, "Persist the built image tag into skipper.yaml")
 	return cmd
 }
 
 func newDeployCmd() *cobra.Command {
 	var strategy string
 	var autoRollback bool
+	var imageOverride string
 
 	cmd := &cobra.Command{
 		Use:   "deploy",
@@ -176,6 +196,9 @@ func newDeployCmd() *cobra.Command {
 			spec, err := loadSpec()
 			if err != nil {
 				return err
+			}
+			if strings.TrimSpace(imageOverride) != "" {
+				spec.Image = strings.TrimSpace(imageOverride)
 			}
 
 			// Governance policy evaluation gate
@@ -250,6 +273,7 @@ func newDeployCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&strategy, "strategy", "s", "canary", "Rollout strategy: 'canary' or 'blue-green'")
 	cmd.Flags().BoolVar(&autoRollback, "auto-rollback", true, "Automatically rollback on health gate failure")
+	cmd.Flags().StringVarP(&imageOverride, "image", "i", "", "Override target OCI image tag for this deployment")
 	return cmd
 }
 
@@ -324,13 +348,17 @@ func newScanCmd() *cobra.Command {
 }
 
 func newUpCmd() *cobra.Command {
-	return &cobra.Command{
+	var imageOverride string
+	cmd := &cobra.Command{
 		Use:   "up",
 		Short: "Deploy or run the application on the chosen target (docker/kubernetes)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			spec, err := loadSpec()
 			if err != nil {
 				return err
+			}
+			if strings.TrimSpace(imageOverride) != "" {
+				spec.Image = strings.TrimSpace(imageOverride)
 			}
 			engine := getRuntimeAdapter()
 			ctx := context.Background()
@@ -339,7 +367,7 @@ func newUpCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Printf("==> Deploying '%s' to target runtime [%s]...\n", spec.Name, engine.Name())
+			fmt.Fprintf(cmd.OutOrStdout(), "==> Deploying '%s' to target runtime [%s]...\n", spec.Name, engine.Name())
 			status, err := engine.Deploy(ctx, spec)
 			if err != nil {
 				return err
@@ -356,11 +384,13 @@ func newUpCmd() *cobra.Command {
 				})
 			}
 
-			fmt.Printf("==> Workload '%s' deployed successfully!\nState: %s (Replicas: %d/%d)\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "==> Workload '%s' deployed successfully!\nState: %s (Replicas: %d/%d)\n",
 				status.Name, status.State, status.Available, status.Replicas)
 			return nil
 		},
 	}
+	cmd.Flags().StringVarP(&imageOverride, "image", "i", "", "Override target OCI image tag for this run")
+	return cmd
 }
 
 func newStatusCmd() *cobra.Command {

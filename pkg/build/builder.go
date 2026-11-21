@@ -219,7 +219,7 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 
 	// Synthesize automated multi-stage Dockerfile if pack is absent for zero-setup ergonomics
 	_, _ = fmt.Fprintf(out, "==> Synthesizing optimal multi-stage container build for [%s]...\n", detection.Runtime)
-	synthDockerfile, err := b.synthesizeDockerfile(detection)
+	synthDockerfile, err := b.synthesizeDockerfileForDir(detection, sourceDir)
 	if err != nil {
 		return "", err
 	}
@@ -249,10 +249,36 @@ func appendBuildArgFlags(args []string, buildArgs map[string]string) []string {
 	return args
 }
 
+func detectGoVersionFromMod(sourceDir string) string {
+	const fallback = "1.25"
+	if sourceDir == "" {
+		return fallback
+	}
+	data, err := os.ReadFile(filepath.Join(sourceDir, "go.mod"))
+	if err != nil {
+		return fallback
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) >= 2 && fields[0] == "go" {
+			parts := strings.Split(fields[1], ".")
+			if len(parts) >= 2 {
+				return parts[0] + "." + parts[1]
+			}
+		}
+	}
+	return fallback
+}
+
 func (b *CNBBuilder) synthesizeDockerfile(det *DetectionResult) (string, error) {
+	return b.synthesizeDockerfileForDir(det, ".")
+}
+
+func (b *CNBBuilder) synthesizeDockerfileForDir(det *DetectionResult, sourceDir string) (string, error) {
 	switch det.Runtime {
 	case RuntimeGo:
-		return `FROM golang:1.25-alpine AS builder
+		goVer := detectGoVersionFromMod(sourceDir)
+		return fmt.Sprintf(`FROM golang:%s-alpine AS builder
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download || true
@@ -264,7 +290,7 @@ USER nonroot:nonroot
 WORKDIR /app
 COPY --from=builder /app/server /app/server
 ENTRYPOINT ["/app/server"]
-`, nil
+`, goVer), nil
 
 	case RuntimeNodeJS:
 		return `FROM node:20-alpine AS builder

@@ -65,6 +65,7 @@ Auto-detects Go, Node.js, Python, Rust, Java, or custom Dockerfiles and builds s
 
 **Flags:**
 - `-t`, `--tag <image:tag>` — Override target OCI image tag (e.g. `my-app:v1.0.0`, defaults to `spec.Image` or `<name>:latest`)
+- `--save` — Persist the built image tag into `skipper.yaml`
 
 ```bash
 $ skipper build
@@ -72,13 +73,18 @@ $ skipper build
 ==> Synthesizing optimal multi-stage container build for [go]...
 ==> Successfully built and tagged OCI image: payment-api:latest
 
-$ skipper build -t ghcr.io/my-org/payment-api:v1.2.3
+$ skipper build -t ghcr.io/my-org/payment-api:v1.2.3 --save
 ```
 
 ### `skipper up` / `skipper down`
 Starts or stops the container workload on the configured runtime (`-r docker` or `-r kubernetes`).
+
+**`skipper up` Flags:**
+- `-i`, `--image <image:tag>` — Override target OCI image tag for this run
+
 ```bash
 $ skipper up
+$ skipper up -i ghcr.io/my-org/payment-api:v1.2.3
 $ skipper up -r kubernetes -n staging
 $ skipper down
 $ skipper down payment-api

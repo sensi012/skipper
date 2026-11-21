@@ -115,9 +115,10 @@ func TestNormalizeDockerUnits(t *testing.T) {
 		"1Gi":     "1g",
 		"256Ki":   "256k",
 		"2Ti":     "2048g",
-		"500M":    "500m",
-		"2G":      "2g",
-		"1024K":   "1024k",
+		"500M":    "477m",
+		"1G":      "954m",
+		"2G":      "1907m",
+		"1024K":   "1000k",
 		"512m":    "512m",
 		"1048576": "1048576",
 		"":        "",
@@ -156,6 +157,13 @@ func TestBuildDockerRunArgsK8sUnitsAndSecurity(t *testing.T) {
 			RunAsNonRoot:           true,
 			ReadOnlyRootFilesystem: true,
 		},
+		Health: config.HealthConfig{
+			Liveness: &config.ProbeConfig{
+				Path:          "/livez",
+				Port:          8080,
+				PeriodSeconds: 15,
+			},
+		},
 		Runtime: config.RuntimeConfig{
 			Resources: config.ResourceConfig{
 				Memory: config.ResourceLimit{Limit: "512Mi"},
@@ -171,8 +179,11 @@ func TestBuildDockerRunArgsK8sUnitsAndSecurity(t *testing.T) {
 		"-p", "8080:8080",
 		"--security-opt=no-new-privileges:true",
 		"--read-only",
+		"--tmpfs", "/tmp:rw,noexec,nosuid",
 		"-m", "512m",
 		"--cpus", "0.5",
+		"--health-cmd", "wget -qO- http://127.0.0.1:8080/livez || exit 1",
+		"--health-interval", "15s",
 		"dns-proxy:v1",
 	}
 	if !reflect.DeepEqual(got, want) {

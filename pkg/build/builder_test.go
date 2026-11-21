@@ -308,9 +308,9 @@ func TestBuild_DockerfileFallbackPath(t *testing.T) {
 }
 
 func TestBuild_SynthesizedDockerfileFallback(t *testing.T) {
-	t.Run("synthesizes and pipes Go Dockerfile when pack absent", func(t *testing.T) {
+	t.Run("synthesizes and pipes Go Dockerfile matching go.mod version when pack absent", func(t *testing.T) {
 		dir := t.TempDir()
-		_ = os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/svc"), 0644)
+		_ = os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/svc\n\ngo 1.23.4\n"), 0644)
 
 		var stdinContent string
 		var buildCmd []string
@@ -341,8 +341,8 @@ func TestBuild_SynthesizedDockerfileFallback(t *testing.T) {
 		if len(buildCmd) < 6 || buildCmd[0] != "docker" || buildCmd[4] != "-f" || buildCmd[5] != "-" {
 			t.Fatalf("expected docker build -f -, got %v", buildCmd)
 		}
-		if !strings.Contains(stdinContent, "FROM golang:") {
-			t.Fatalf("expected synthesized Go Dockerfile on stdin, got:\n%s", stdinContent)
+		if !strings.Contains(stdinContent, "FROM golang:1.23-alpine AS builder") {
+			t.Fatalf("expected synthesized Go 1.23 Dockerfile on stdin, got:\n%s", stdinContent)
 		}
 	})
 
