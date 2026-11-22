@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1863,6 +1866,248 @@ func TestJSONHygieneAndEnvContracts(t *testing.T) {
 		resetGlobals(t)
 		if _, _, err := executeCLI(t, "port-forward", "svc", "invalid-port"); err == nil {
 			t.Fatal("expected error for port-forward with invalid port format")
+		}
+	})
+}
+
+func TestComposeHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_COMPOSE_HELPER") != "1" {
+		return
+	}
+	if s := os.Getenv("COMPOSE_HELPER_STDOUT"); s != "" {
+		_, _ = fmt.Fprint(os.Stdout, s)
+	}
+	if s := os.Getenv("COMPOSE_HELPER_STDERR"); s != "" {
+		_, _ = fmt.Fprint(os.Stderr, s)
+	}
+	code, _ := strconv.Atoi(os.Getenv("COMPOSE_HELPER_EXIT"))
+	os.Exit(code)
+}
+
+type composeExecStub struct {
+	stdout   string
+	stderr   string
+	exitCode int
+}
+
+func withFakeComposeRunner(t *testing.T, handler func(name string, args []string) composeExecStub, calls *[][]string) {
+	t.Helper()
+	orig := newComposeRunner
+	newComposeRunner = func() *runtime.ComposeRunner {
+		return runtime.NewComposeRunnerWithExec(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			if calls != nil {
+				*calls = append(*calls, append([]string{name}, args...))
+			}
+			res := handler(name, args)
+			cs := []string{"-test.run=TestComposeHelperProcess", "--", name}
+			cs = append(cs, args...)
+			cmd := exec.CommandContext(ctx, os.Args[0], cs...)
+			cmd.Env = append(os.Environ(),
+				"GO_WANT_COMPOSE_HELPER=1",
+				"COMPOSE_HELPER_STDOUT="+res.stdout,
+				"COMPOSE_HELPER_STDERR="+res.stderr,
+				fmt.Sprintf("COMPOSE_HELPER_EXIT=%d", res.exitCode),
+			)
+			return cmd
+		})
+	}
+	t.Cleanup(func() { newComposeRunner = orig })
+}
+
+func TestComposeLifecycleCmds(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+
+	samplePSNDJSON := `{"Name":"proj-db-1","Service":"db","Image":"postgres:16-alpine","State":"running","Status":"Up 10 seconds","Publishers":[{"PublishedPort":5432,"TargetPort":5432,"Protocol":"tcp"}]}
+{"Name":"proj-backend-1","Service":"backend","Image":"proj-backend:latest","State":"running","Status":"Up 8 seconds","Publishers":[{"PublishedPort":8080,"TargetPort":8080,"Protocol":"tcp"}]}
+`
+
+	t.Run("help flags render without short-flag collision", func(t *testing.T) {
+		for _, args := range [][]string{{"up", "--help"}, {"down", "--help"}, {"status", "--help"}} {
+			resetGlobals(t)
+			out, _, err := executeCLI(t, args...)
+			if err != nil {
+				t.Fatalf("%v failed: %v", args, err)
+			}
+			if !strings.Contains(out, "--compose") {
+				t.Errorf("%v missing --compose flag:\n%s", args, out)
+			}
+		}
+	})
+
+	t.Run("auto-compose up, status, and down (text and strict JSON)", func(t *testing.T) {
+		resetGlobals(t)
+		setupThreeTierDir(t)
+
+		var calls [][]string
+		withFakeComposeRunner(t, func(name string, args []string) composeExecStub {
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, " ps ") {
+				return composeExecStub{stdout: samplePSNDJSON}
+			}
+			return composeExecStub{stdout: "compose progress line\n", stderr: "compose stderr info\n"}
+		}, &calls)
+
+		// Auto-compose `up --build` text mode
+		out, _, err := executeCLI(t, "up", "--build")
+		if err != nil {
+			t.Fatalf("auto-compose up failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "No skipper.yaml found; using docker-compose.yml") || !strings.Contains(out, "SERVICE") || !strings.Contains(out, "backend") {
+			t.Errorf("unexpected compose up text output:\n%s", out)
+		}
+		if len(calls) < 2 || !strings.Contains(strings.Join(calls[0], " "), "compose -f docker-compose.yml up -d --build") {
+			t.Errorf("unexpected compose up exec calls: %v", calls)
+		}
+
+		// Auto-compose `up --format json` strict JSON hygiene
+		calls = nil
+		resetGlobals(t)
+		out, stderr, err := executeCLI(t, "up", "--format", "json")
+		if err != nil {
+			t.Fatalf("auto-compose up --format json failed: %v\nstderr=%s", err, stderr)
+		}
+		var upJSON struct {
+			Mode     string                         `json:"mode"`
+			Project  string                         `json:"project"`
+			File     string                         `json:"file"`
+			Services []runtime.ComposeServiceStatus `json:"services"`
+		}
+		if err := json.Unmarshal([]byte(out), &upJSON); err != nil {
+			t.Fatalf("up --format json corrupted stdout: %v\nout:\n%s", err, out)
+		}
+		if upJSON.Mode != "compose" || upJSON.File != "docker-compose.yml" || len(upJSON.Services) != 2 {
+			t.Errorf("unexpected compose up JSON payload: %+v", upJSON)
+		}
+
+		// Auto-compose `status` text & JSON
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "status")
+		if err != nil || !strings.Contains(out, "SERVICE") || !strings.Contains(out, "5432->5432/tcp") {
+			t.Fatalf("auto-compose status text failed: err=%v out=\n%s", err, out)
+		}
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "status", "--format", "json")
+		if err != nil {
+			t.Fatalf("auto-compose status --format json failed: %v", err)
+		}
+		var statusJSON struct {
+			Mode     string                         `json:"mode"`
+			Services []runtime.ComposeServiceStatus `json:"services"`
+		}
+		if err := json.Unmarshal([]byte(out), &statusJSON); err != nil || statusJSON.Mode != "compose" || len(statusJSON.Services) != 2 {
+			t.Fatalf("status --format json invalid: err=%v out=%s", err, out)
+		}
+
+		// Auto-compose `down -v` text & JSON
+		calls = nil
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "down", "-v")
+		if err != nil || !strings.Contains(out, "named volumes removed") {
+			t.Fatalf("auto-compose down -v text failed: err=%v out=\n%s", err, out)
+		}
+		if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "down -v --remove-orphans") {
+			t.Errorf("expected docker compose down -v --remove-orphans, got %v", calls)
+		}
+
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "down", "--volumes", "--format", "json")
+		if err != nil {
+			t.Fatalf("auto-compose down --format json failed: %v", err)
+		}
+		var downJSON struct {
+			Mode           string `json:"mode"`
+			Status         string `json:"status"`
+			VolumesRemoved bool   `json:"volumesRemoved"`
+		}
+		if err := json.Unmarshal([]byte(out), &downJSON); err != nil || downJSON.Mode != "compose" || downJSON.Status != "STOPPED" || !downJSON.VolumesRemoved {
+			t.Fatalf("down --format json invalid: err=%v out=%s", err, out)
+		}
+
+		// Verify opmem recorded MUTATION events
+		if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
+			events, err := ledger.QueryTimeline("", 10*time.Minute)
+			if err != nil || len(events) < 2 {
+				t.Errorf("expected opmem MUTATION events from compose up/down, got %d (err=%v)", len(events), err)
+			}
+		}
+	})
+
+	t.Run("explicit --compose, --service filtering, unknown service, and empty status", func(t *testing.T) {
+		resetGlobals(t)
+		dir := setupThreeTierDir(t)
+		// Even with skipper.yaml present, explicit --compose selects compose mode
+		_ = os.WriteFile(filepath.Join(dir, "skipper.yaml"), []byte(sampleCompliantSpec), 0644)
+
+		var calls [][]string
+		withFakeComposeRunner(t, func(name string, args []string) composeExecStub {
+			return composeExecStub{stdout: ""}
+		}, &calls)
+
+		out, _, err := executeCLI(t, "up", "--compose", "docker-compose.yml", "--service", "backend")
+		if err != nil {
+			t.Fatalf("explicit --compose up --service failed: %v\n%s", err, out)
+		}
+		if len(calls) < 1 || !strings.HasSuffix(strings.Join(calls[0], " "), "up -d backend") {
+			t.Errorf("expected filtered backend service in compose up, got: %v", calls)
+		}
+
+		// Unknown service returns clear error listing available services
+		resetGlobals(t)
+		_, _, err = executeCLI(t, "status", "--compose", "docker-compose.yml", "--service", "ghost")
+		if err == nil || !strings.Contains(err.Error(), "unknown service") || !strings.Contains(err.Error(), "backend") {
+			t.Fatalf("expected unknown service error, got: %v", err)
+		}
+
+		// Empty status returns non-nil JSON array []
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "status", "--compose", "docker-compose.yml", "--format", "json")
+		if err != nil {
+			t.Fatalf("empty compose status --format json failed: %v", err)
+		}
+		if !strings.Contains(out, `"services": []`) {
+			t.Errorf("expected non-nil empty services array in JSON:\n%s", out)
+		}
+	})
+
+	t.Run("-r kubernetes with --compose fails cleanly and single-service mode stays intact", func(t *testing.T) {
+		resetGlobals(t)
+		dir := setupThreeTierDir(t)
+		_ = os.WriteFile(filepath.Join(dir, "skipper.yaml"), []byte(sampleCompliantSpec), 0644)
+
+		for _, sub := range []string{"up", "down", "status"} {
+			resetGlobals(t)
+			_, _, err := executeCLI(t, "-r", "kubernetes", sub, "--compose", "docker-compose.yml")
+			if err == nil || !strings.Contains(err.Error(), "--compose is only supported with the docker runtime") {
+				t.Fatalf("expected docker-only error for -r kubernetes %s --compose, got: %v", sub, err)
+			}
+		}
+
+		// Single-service mode with skipper.yaml rejects --service
+		for _, sub := range []string{"up", "status"} {
+			resetGlobals(t)
+			_, _, err := executeCLI(t, sub, "--service", "backend")
+			if err == nil || !strings.Contains(err.Error(), "--service requires compose mode") {
+				t.Fatalf("expected --service requires compose mode for %s with skipper.yaml, got: %v", sub, err)
+			}
+		}
+
+		// Single-service mode still delegates to runtime adapter unchanged
+		stub := &stubRuntimeEngine{name: "docker"}
+		withStubRuntime(t, stub)
+		resetGlobals(t)
+		out, _, err := executeCLI(t, "status")
+		if err != nil || !strings.Contains(out, "Workload: demo-service") {
+			t.Fatalf("expected single-service status when skipper.yaml exists, got err=%v out=%s", err, out)
+		}
+
+		// Positional workload arg on down/status uses single-service mode even without skipper.yaml
+		_ = os.Remove(filepath.Join(dir, "skipper.yaml"))
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "down", "explicit-svc")
+		if err != nil || !strings.Contains(out, "Workload 'explicit-svc' stopped") {
+			t.Fatalf("expected single-service down when positional arg given, got err=%v out=%s", err, out)
 		}
 	})
 }

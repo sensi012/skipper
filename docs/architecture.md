@@ -9,7 +9,7 @@
    - Standard `kubectl`, `helm`, and GitOps controllers (`flux`, `argocd`) execute the output without custom daemon dependencies.
 
 2. **Bidirectional Environment Parity:**
-   - Local ephemeral targets (Kind / K3d / Docker) behave with identical semantics, networking contracts, and security contexts to remote production clusters (EKS / GKE / AKS / Baremetal).
+   - Local ephemeral targets (Kind / K3d / Docker / Docker Compose) behave with identical semantics, networking contracts, and security contexts to remote production clusters (EKS / GKE / AKS / Baremetal).
 
 3. **Stateless Runtime, Stateful Operational Memory:**
    - Kubernetes controls ephemeral infrastructure; Skipper maintains an immutable temporal ledger (`ChangeRecord`, `DebugSessionRecord`, and `CausalEvent`) tracking change lineage, build provenance, and incident triage history under `~/.skipper/opmem`.
@@ -19,7 +19,7 @@
    - Automated remediation strictly requires policy-controlled verification gates and human approvals in production.
 
 5. **Strong Defaults, Principled Escape Hatches:**
-   - Developers write $< 30$ lines of declarative intent (`skipper.yaml`).
+   - Developers write $< 30$ lines of declarative intent (`skipper.yaml`) or reuse an existing `docker-compose.yml`.
    - The platform auto-synthesizes resource boundaries, probes, security contexts, and isolation policies, while providing clean override patches.
 
 ---
@@ -38,28 +38,31 @@
 
 ### Phase 1: Unified CLI Engine & Dual-Target Runtime Adapter
 - [x] **Step 1.1: Initialize Modular Go CLI Architecture**
-  - Built unified Cobra CLI framework ([`cmd/skipper/main.go`](../cmd/skipper/main.go)) with standard command vocabulary.
+  - Built unified Cobra CLI framework ([`cmd/skipper/main.go`](../cmd/skipper/main.go)) with 28 standard commands and strict `--format json` output hygiene.
   - Implemented declarative config parser ([`pkg/config/spec.go`](../pkg/config/spec.go)).
   - Compiled and verified single binary `bin/skipper.exe`.
-- [x] **Step 1.2: Dual-Target Runtime Abstraction Layer**
+- [x] **Step 1.2: Dual-Target Runtime Abstraction Layer & Multi-Service Compose Delegation**
   - Implemented `RuntimeEngine` interface ([`pkg/runtime/interface.go`](../pkg/runtime/interface.go)).
-  - Built `DockerAdapter` ([`pkg/runtime/docker.go`](../pkg/runtime/docker.go)) and `KubernetesAdapter` ([`pkg/runtime/kubernetes.go`](../pkg/runtime/kubernetes.go)).
+  - Built `DockerAdapter` ([`pkg/runtime/docker.go`](../pkg/runtime/docker.go)) with automatic local multi-service dependency networking (`pkg/runtime/deps.go`) and `KubernetesAdapter` ([`pkg/runtime/kubernetes.go`](../pkg/runtime/kubernetes.go)).
+  - Built `ComposeRunner` ([`pkg/runtime/compose.go`](../pkg/runtime/compose.go)) delegating multi-service `skipper up`, `skipper down`, and `skipper status` cleanly to `docker compose -f <file>` with NDJSON and legacy array status parsing, service filtering, and strict argument validation.
 - [x] **Step 1.3: Local Development Engine Integration (Kind)**
   - Implemented ephemeral Kind cluster manager ([`pkg/local/cluster.go`](../pkg/local/cluster.go)).
 
 ### Phase 2: Autonomous Buildpacks & Production Manifest Synthesizer
-- [x] **Step 2.1: Multi-Language Autonomous Builder Engine**
-  - Implemented `CNBBuilder` ([`pkg/build/builder.go`](../pkg/build/builder.go)) supporting Go, Node.js, Python, Rust, Java, and Dockerfiles.
+- [x] **Step 2.1: Multi-Language Autonomous Builder Engine & Smart Dockerfile Synthesis**
+  - Implemented `CNBBuilder` ([`pkg/build/builder.go`](../pkg/build/builder.go)) supporting Go, Node.js, Python, Rust, Java, custom Dockerfiles, Docker Compose multi-service builds, and monorepo subdirectory discovery.
+  - Added smart **Node.js** synthesis (`detectNodeBuildPlan`): detects SPA/static frontends (Vite, CRA `react-scripts`, Angular, Vue, Svelte, Parcel, Gatsby) to synthesize 2-stage `node:20-alpine` -> `nginx:alpine` SPA images (`try_files $uri $uri/ /index.html;`), and detects backend entrypoints (`scripts.start`, `main`, or `server.js`/`app.js`/`index.js`) + TypeScript `scripts.build` steps targeting `gcr.io/distroless/nodejs20-debian12:nonroot`.
+  - Added smart **Python** synthesis (`detectPythonBuildPlan`): supports `pyproject.toml`-only projects alongside `requirements.txt`, detects `fastapi`/`uvicorn` and `gunicorn`, and probes `main.py` -> `app.py` -> `server.py` -> `wsgi.py` entrypoints.
 - [x] **Step 2.2: Hardened Manifest Synthesizer**
   - Implemented synthesizer ([`pkg/synthesizer/synthesizer.go`](../pkg/synthesizer/synthesizer.go)) generating Deployments, Services, NetworkPolicies, and PDBs.
 - [x] **Step 2.3: Shift-Left Vulnerability Scanner**
   - Built `TrivyScanner` ([`pkg/security/scanner.go`](../pkg/security/scanner.go)) with Trivy, Docker Scout, and internal static fallbacks.
-- [x] **Step 2.4: Progressive Delivery Controller**
-  - Implemented Canary and Blue-Green rollouts with health gates ([`pkg/rollout/controller.go`](../pkg/rollout/controller.go)).
+- [x] **Step 2.4: Progressive Delivery Controller & Live Rollbacks**
+  - Implemented Canary and Blue-Green rollouts with health gates ([`pkg/rollout/controller.go`](../pkg/rollout/controller.go)) and live `kubectl rollout undo` management (`RollbackManager` in [`pkg/rollout/rollback.go`](../pkg/rollout/rollback.go)).
 
 ### Phase 3: Persistent Operational Memory & Causal Ledger
 - [x] **Step 3.1: Temporal Causal Event Ledger**
-  - Built append-only JSONL event storage engine ([`pkg/opmem/ledger.go`](../pkg/opmem/ledger.go)).
+  - Built thread-safe append-only JSONL event storage engine ([`pkg/opmem/ledger.go`](../pkg/opmem/ledger.go)).
 - [x] **Step 3.2: Context-Retaining Interactive Debugger**
   - Integrated debug session preservation and ephemeral container launch.
 
@@ -73,13 +76,14 @@
 - [x] **Step 5.1: Policy-as-Code Compliance Engine**
   - Implemented pre-deployment validation rules ([`pkg/governance/engine.go`](../pkg/governance/engine.go)).
 - [x] **Step 5.2: FinOps Workload Rightsizing Analyzer**
-  - Implemented resource delta and monthly cloud cost savings analyzer.
+  - Implemented live Prometheus / `kubectl top pod` and baseline resource delta + monthly cloud cost savings analyzer ([`pkg/governance/engine.go`](../pkg/governance/engine.go)).
 
-### Phase 6: Production Hardening, Quality Assurance & Day-2 Features
-- [x] **Step 6.1: Quality Assurance & Multi-Tier Testing**
-  - 21/21 packages unit tested (100% PASS).
-  - End-to-end integration pipeline validated ([`test/e2e/pipeline_test.go`](../test/e2e/pipeline_test.go)).
-  - Microsecond latency benchmarks recorded ([`test/bench/benchmark_test.go`](../test/bench/benchmark_test.go)).
+### Phase 6: Production Hardening, Automated CI & Day-2 Features
+- [x] **Step 6.1: Quality Assurance, Multi-Tier Testing & Automated Linux CI Gate**
+  - 23/23 packages unit tested (100% PASS) with concurrency, path-traversal, and CLI flag-injection hardening.
+  - Automated Linux GitHub Actions CI workflow ([`.github/workflows/ci.yaml`](../.github/workflows/ci.yaml)) running `gofmt -l .`, `go vet ./...`, `go test -race -count=1 -coverprofile=coverage.out ./...`, `golangci-lint`, and `govulncheck` on every push and pull request.
+  - Cross-platform release pipeline ([`.github/workflows/release.yaml`](../.github/workflows/release.yaml)) producing binaries + SHA256 `checksums.txt`, plus Homebrew, Scoop, and Winget manifests.
+  - End-to-end integration pipeline validated ([`test/e2e/pipeline_test.go`](../test/e2e/pipeline_test.go)) and microsecond latency benchmarks recorded ([`test/bench/benchmark_test.go`](../test/bench/benchmark_test.go)).
 - [x] **Step 6.2: Day-2 Developer Ergonomics**
   - Integrated `skipper doctor`, `skipper init`, `skipper dev` (hot-reload), `skipper port-forward`, `skipper secret`, and `skipper import compose`.
   - Embedded JSON Schema Draft 2020-12 directly into the binary ([`schemas/embed.go`](../schemas/embed.go)) so `skipper explain --schema` works from any working directory.
@@ -102,4 +106,4 @@
 - [x] **Step 7.6: Secret Sync with Vault & ExternalSecrets**
   - Implemented `GenerateExternalSecretManifest` and stdlib HTTP `VaultSyncClient` (KV v2 `Push`/`Pull`) ([`pkg/secret/sync.go`](../pkg/secret/sync.go)) generating `external-secrets.io/v1beta1` `SecretStore` + `ExternalSecret` YAML for Vault, AWS Secrets Manager, and GCP Secret Manager (`skipper secret sync`).
 - [x] **Step 7.7: Extended Autonomous MCP Operational Tools**
-  - Extended the Model Context Protocol server ([`pkg/mcp/server.go`](../pkg/mcp/server.go)) to 10 tools by adding `skipper_rollback`, `skipper_investigate_incident`, `skipper_sbom`, and `skipper_drift_check` alongside the 6 core operational tools.
+  - Hardened the Model Context Protocol server ([`pkg/mcp/server.go`](../pkg/mcp/server.go)) with 10 tools (`skipper_doctor`, `skipper_init`, `skipper_policy_check`, `skipper_manifest`, `skipper_diagnose`, `skipper_rightsize`, `skipper_rollback`, `skipper_investigate_incident`, `skipper_sbom`, `skipper_drift_check`), `ServeIO` context propagation, panic recovery, 256 KiB output/log bounding, and strict stdout JSON-RPC 2.0 hygiene.

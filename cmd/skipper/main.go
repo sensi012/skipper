@@ -42,6 +42,7 @@ var (
 	appConfigFile            string
 	outputFormat             string
 	newCNBBuilder            = build.NewCNBBuilder
+	newComposeRunner         = runtime.NewComposeRunner
 	newKindManager           = local.NewKindManager
 	newTrivyScanner          = security.NewTrivyScanner
 	newContextGroundedEngine = diagnostics.NewContextGroundedEngine
@@ -651,12 +652,262 @@ func newScanCmd() *cobra.Command {
 	}
 }
 
+func loadAndValidateComposeServices(composePath string, servicesFilter []string) (*transpile.ComposeProject, []string, error) {
+	proj, err := transpile.LoadComposeProject(composePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(servicesFilter) == 0 {
+		return proj, nil, nil
+	}
+
+	avail := make([]string, 0, len(proj.Services))
+	svcSet := make(map[string]bool, len(proj.Services))
+	for _, s := range proj.Services {
+		avail = append(avail, s.Name)
+		svcSet[s.Name] = true
+	}
+
+	selected := make([]string, 0, len(servicesFilter))
+	seen := make(map[string]bool, len(servicesFilter))
+	for _, raw := range servicesFilter {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if !svcSet[name] {
+			return nil, nil, fmt.Errorf("unknown service %q; available services: %s", name, strings.Join(avail, ", "))
+		}
+		if !seen[name] {
+			seen[name] = true
+			selected = append(selected, name)
+		}
+	}
+	return proj, selected, nil
+}
+
+func printComposeStatusTable(out io.Writer, statuses []runtime.ComposeServiceStatus) {
+	fmt.Fprintf(out, "%-20s %-12s %-28s %-24s %s\n", "SERVICE", "STATE", "IMAGE", "PORTS", "STATUS")
+	for _, st := range statuses {
+		svc := st.Service
+		if svc == "" {
+			svc = st.Name
+		}
+		ports := st.Ports
+		if ports == "" {
+			ports = "-"
+		}
+		fmt.Fprintf(out, "%-20s %-12s %-28s %-24s %s\n", svc, st.State, st.Image, ports, st.Status)
+	}
+}
+
+func runComposeUp(cmd *cobra.Command, composePath string, autoDetected bool, servicesFilter []string, buildFlag bool) error {
+	proj, selected, err := loadAndValidateComposeServices(composePath, servicesFilter)
+	if err != nil {
+		return err
+	}
+
+	out := cmd.OutOrStdout()
+	progressOut := out
+	if outputFormat == "json" {
+		progressOut = cmd.ErrOrStderr()
+	}
+
+	if autoDetected {
+		fmt.Fprintf(progressOut, "==> No skipper.yaml found; using %s (project: %s)\n", composePath, proj.Name)
+	}
+	fmt.Fprintf(progressOut, "==> Starting Compose services from '%s' (project: %s)...\n", composePath, proj.Name)
+
+	ctx := context.Background()
+	runner := newComposeRunner()
+	if err := runner.Up(ctx, runtime.ComposeUpOptions{
+		File:     composePath,
+		Services: selected,
+		Build:    buildFlag,
+		Detach:   true,
+	}, progressOut, cmd.ErrOrStderr()); err != nil {
+		return err
+	}
+
+	statuses, statusErr := runner.Status(ctx, composePath, selected)
+	if statusErr != nil || statuses == nil {
+		statuses = make([]runtime.ComposeServiceStatus, 0, len(proj.Services))
+		filterSet := make(map[string]bool, len(selected))
+		for _, s := range selected {
+			filterSet[s] = true
+		}
+		for _, svc := range proj.Services {
+			if len(filterSet) > 0 && !filterSet[svc.Name] {
+				continue
+			}
+			statuses = append(statuses, runtime.ComposeServiceStatus{
+				Service: svc.Name,
+				Image:   svc.Image,
+				State:   "running",
+			})
+		}
+	}
+
+	if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
+		_ = ledger.RecordTelemetryEvent(&opmem.CausalEvent{
+			Timestamp:   time.Now(),
+			Type:        "MUTATION",
+			Source:      "app up",
+			Description: fmt.Sprintf("Started Compose project %s from %s (%d service(s))", proj.Name, composePath, len(statuses)),
+			Severity:    "INFO",
+		})
+	}
+
+	if outputFormat == "json" {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]interface{}{
+			"mode":     "compose",
+			"project":  proj.Name,
+			"file":     composePath,
+			"services": statuses,
+		})
+	}
+
+	fmt.Fprintf(out, "==> Compose project '%s' is up!\n", proj.Name)
+	if len(statuses) > 0 {
+		printComposeStatusTable(out, statuses)
+	}
+	return nil
+}
+
+func runComposeStatus(cmd *cobra.Command, composePath string, autoDetected bool, servicesFilter []string) error {
+	proj, selected, err := loadAndValidateComposeServices(composePath, servicesFilter)
+	if err != nil {
+		return err
+	}
+
+	out := cmd.OutOrStdout()
+	progressOut := out
+	if outputFormat == "json" {
+		progressOut = cmd.ErrOrStderr()
+	}
+	if autoDetected {
+		fmt.Fprintf(progressOut, "==> No skipper.yaml found; using %s (project: %s)\n", composePath, proj.Name)
+	}
+
+	runner := newComposeRunner()
+	statuses, err := runner.Status(context.Background(), composePath, selected)
+	if err != nil {
+		return err
+	}
+	if statuses == nil {
+		statuses = []runtime.ComposeServiceStatus{}
+	}
+
+	if outputFormat == "json" {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]interface{}{
+			"mode":     "compose",
+			"project":  proj.Name,
+			"file":     composePath,
+			"services": statuses,
+		})
+	}
+
+	if len(statuses) == 0 {
+		fmt.Fprintf(out, "No containers found for Compose project '%s'.\n", proj.Name)
+		return nil
+	}
+	printComposeStatusTable(out, statuses)
+	return nil
+}
+
+func runComposeDown(cmd *cobra.Command, composePath string, autoDetected bool, removeVolumes bool) error {
+	proj, err := transpile.LoadComposeProject(composePath)
+	if err != nil {
+		return err
+	}
+
+	out := cmd.OutOrStdout()
+	progressOut := out
+	if outputFormat == "json" {
+		progressOut = cmd.ErrOrStderr()
+	}
+
+	if autoDetected {
+		fmt.Fprintf(progressOut, "==> No skipper.yaml found; using %s (project: %s)\n", composePath, proj.Name)
+	}
+	fmt.Fprintf(progressOut, "==> Stopping Compose project '%s' (%s)...\n", proj.Name, composePath)
+
+	runner := newComposeRunner()
+	if err := runner.Down(context.Background(), runtime.ComposeDownOptions{
+		File:          composePath,
+		RemoveVolumes: removeVolumes,
+		RemoveOrphans: true,
+	}, progressOut, cmd.ErrOrStderr()); err != nil {
+		return err
+	}
+
+	if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
+		_ = ledger.RecordTelemetryEvent(&opmem.CausalEvent{
+			Timestamp:   time.Now(),
+			Type:        "MUTATION",
+			Source:      "app down",
+			Description: fmt.Sprintf("Stopped Compose project %s from %s (volumesRemoved=%v)", proj.Name, composePath, removeVolumes),
+			Severity:    "INFO",
+		})
+	}
+
+	if outputFormat == "json" {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]interface{}{
+			"mode":           "compose",
+			"project":        proj.Name,
+			"file":           composePath,
+			"status":         "STOPPED",
+			"volumesRemoved": removeVolumes,
+		})
+	}
+
+	if removeVolumes {
+		fmt.Fprintf(out, "==> Compose project '%s' stopped and named volumes removed.\n", proj.Name)
+	} else {
+		fmt.Fprintf(out, "==> Compose project '%s' stopped.\n", proj.Name)
+	}
+	return nil
+}
+
 func newUpCmd() *cobra.Command {
 	var imageOverride string
+	var composeFile string
+	var servicesFilter []string
+	var buildFlag bool
+
 	cmd := &cobra.Command{
 		Use:   "up",
 		Short: "Deploy or run the application on the chosen target (docker/kubernetes)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(composeFile) != "" {
+				if targetRuntime != "docker" {
+					return fmt.Errorf("--compose is only supported with the docker runtime")
+				}
+				return runComposeUp(cmd, strings.TrimSpace(composeFile), false, servicesFilter, buildFlag)
+			}
+
+			hasExplicitSpec := appConfigFile != "" || fileExists("skipper.yaml") || fileExists("app.yaml")
+			if hasExplicitSpec {
+				if len(servicesFilter) > 0 {
+					return fmt.Errorf("--service requires compose mode")
+				}
+			} else if targetRuntime == "docker" {
+				if cf, err := transpile.FindComposeFile("."); err == nil {
+					return runComposeUp(cmd, cf, true, servicesFilter, buildFlag)
+				}
+			}
+
+			if len(servicesFilter) > 0 {
+				return fmt.Errorf("--service requires compose mode")
+			}
+
 			spec, err := loadSpec()
 			if err != nil {
 				return err
@@ -703,14 +954,42 @@ func newUpCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&imageOverride, "image", "i", "", "Override target OCI image tag for this run")
+	cmd.Flags().StringVar(&composeFile, "compose", "", "Path to Docker Compose file for multi-service lifecycle")
+	cmd.Flags().StringSliceVar(&servicesFilter, "service", nil, "Start only specified service(s) in compose mode")
+	cmd.Flags().BoolVar(&buildFlag, "build", false, "Build images before starting containers in compose mode")
 	return cmd
 }
 
 func newStatusCmd() *cobra.Command {
-	return &cobra.Command{
+	var composeFile string
+	var servicesFilter []string
+
+	cmd := &cobra.Command{
 		Use:   "status [name]",
 		Short: "Inspect live status of running workload",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(composeFile) != "" {
+				if targetRuntime != "docker" {
+					return fmt.Errorf("--compose is only supported with the docker runtime")
+				}
+				return runComposeStatus(cmd, strings.TrimSpace(composeFile), false, servicesFilter)
+			}
+
+			hasExplicitSpec := len(args) > 0 || appConfigFile != "" || fileExists("skipper.yaml") || fileExists("app.yaml")
+			if hasExplicitSpec {
+				if len(servicesFilter) > 0 {
+					return fmt.Errorf("--service requires compose mode")
+				}
+			} else if targetRuntime == "docker" {
+				if cf, err := transpile.FindComposeFile("."); err == nil {
+					return runComposeStatus(cmd, cf, true, servicesFilter)
+				}
+			}
+
+			if len(servicesFilter) > 0 {
+				return fmt.Errorf("--service requires compose mode")
+			}
+
 			spec, err := loadSpec()
 			workloadName := ""
 			if err == nil {
@@ -742,6 +1021,9 @@ func newStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&composeFile, "compose", "", "Path to Docker Compose file to inspect multi-service status")
+	cmd.Flags().StringSliceVar(&servicesFilter, "service", nil, "Inspect only specified service(s) in compose mode")
+	return cmd
 }
 
 func newLogsCmd() *cobra.Command {
@@ -1103,10 +1385,27 @@ func newTimeTravelCmd() *cobra.Command {
 }
 
 func newDownCmd() *cobra.Command {
-	return &cobra.Command{
+	var composeFile string
+	var removeVolumes bool
+
+	cmd := &cobra.Command{
 		Use:   "down [name]",
 		Short: "Stop running workload on target runtime",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(composeFile) != "" {
+				if targetRuntime != "docker" {
+					return fmt.Errorf("--compose is only supported with the docker runtime")
+				}
+				return runComposeDown(cmd, strings.TrimSpace(composeFile), false, removeVolumes)
+			}
+
+			hasExplicitSpec := len(args) > 0 || appConfigFile != "" || fileExists("skipper.yaml") || fileExists("app.yaml")
+			if !hasExplicitSpec && targetRuntime == "docker" {
+				if cf, err := transpile.FindComposeFile("."); err == nil {
+					return runComposeDown(cmd, cf, true, removeVolumes)
+				}
+			}
+
 			spec, err := loadSpec()
 			workloadName := ""
 			if err == nil {
@@ -1124,6 +1423,15 @@ func newDownCmd() *cobra.Command {
 			if err := engine.Stop(ctx, workloadName); err != nil {
 				return err
 			}
+			if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
+				_ = ledger.RecordTelemetryEvent(&opmem.CausalEvent{
+					Timestamp:   time.Now(),
+					Type:        "MUTATION",
+					Source:      "app down",
+					Description: fmt.Sprintf("Stopped %s on runtime %s", workloadName, engine.Name()),
+					Severity:    "INFO",
+				})
+			}
 			out := cmd.OutOrStdout()
 			if outputFormat == "json" {
 				enc := json.NewEncoder(out)
@@ -1138,6 +1446,9 @@ func newDownCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&composeFile, "compose", "", "Path to Docker Compose file for multi-service teardown")
+	cmd.Flags().BoolVarP(&removeVolumes, "volumes", "v", false, "Remove named volumes declared in the Compose file")
+	return cmd
 }
 
 func newLocalCmd() *cobra.Command {

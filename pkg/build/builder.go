@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -385,6 +386,215 @@ func detectGoVersionFromMod(sourceDir string) string {
 	return fallback
 }
 
+type nodeBuildPlan struct {
+	IsSPA        bool
+	OutputDir    string
+	HasBuildStep bool
+	Entrypoint   string
+}
+
+var spaFrontendPackages = []string{
+	"vite",
+	"react-scripts",
+	"@angular/cli",
+	"vue",
+	"@vue/cli-service",
+	"svelte",
+	"parcel",
+	"gatsby",
+}
+
+func sanitizeRelativeEntrypoint(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.ContainsAny(s, ";|&`$()<>\"'\\\r\n\x00 \t") {
+		return ""
+	}
+	for strings.HasPrefix(s, "./") {
+		s = strings.TrimPrefix(s, "./")
+	}
+	if s == "" || strings.HasPrefix(s, "-") || strings.HasPrefix(s, "/") {
+		return ""
+	}
+	for _, seg := range strings.Split(s, "/") {
+		if seg == "" || seg == ".." || seg == "." {
+			return ""
+		}
+	}
+	return s
+}
+
+func extractNodeStartEntrypoint(script string) string {
+	s := strings.TrimSpace(script)
+	if s == "" || strings.ContainsAny(s, ";|&`$()<>\r\n\x00") {
+		return ""
+	}
+	fields := strings.Fields(s)
+	idx := 0
+	// Skip leading environment variable assignments like NODE_ENV=production
+	for idx < len(fields) && strings.Contains(fields[idx], "=") && !strings.HasPrefix(fields[idx], "-") {
+		idx++
+	}
+	if idx >= len(fields) || fields[idx] != "node" {
+		return ""
+	}
+	idx++
+	for idx < len(fields) {
+		tok := fields[idx]
+		if strings.HasPrefix(tok, "-") {
+			// Skip flags that take an argument (e.g. -r dotenv/config, --require ...)
+			if (tok == "-r" || tok == "--require" || tok == "--import" || tok == "--loader" || tok == "--env-file") && idx+1 < len(fields) {
+				idx += 2
+				continue
+			}
+			idx++
+			continue
+		}
+		return sanitizeRelativeEntrypoint(tok)
+	}
+	return ""
+}
+
+func detectNodeBuildPlan(sourceDir string) nodeBuildPlan {
+	plan := nodeBuildPlan{
+		Entrypoint: "index.js",
+	}
+
+	var pkg struct {
+		Main            string            `json:"main"`
+		Scripts         map[string]string `json:"scripts"`
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+
+	if sourceDir != "" {
+		if raw, err := os.ReadFile(filepath.Join(sourceDir, "package.json")); err == nil {
+			_ = json.Unmarshal(raw, &pkg)
+		}
+	}
+
+	hasDep := func(name string) bool {
+		if _, ok := pkg.Dependencies[name]; ok {
+			return true
+		}
+		if _, ok := pkg.DevDependencies[name]; ok {
+			return true
+		}
+		return false
+	}
+
+	hasBuildScript := strings.TrimSpace(pkg.Scripts["build"]) != ""
+	startEntrypoint := extractNodeStartEntrypoint(pkg.Scripts["start"])
+
+	hasSPAFramework := false
+	for _, dep := range spaFrontendPackages {
+		if hasDep(dep) {
+			hasSPAFramework = true
+			break
+		}
+	}
+
+	if hasBuildScript && hasSPAFramework && startEntrypoint == "" {
+		plan.IsSPA = true
+		plan.HasBuildStep = true
+		plan.OutputDir = "dist"
+		if hasDep("react-scripts") && !hasDep("vite") {
+			plan.OutputDir = "build"
+		}
+		return plan
+	}
+
+	plan.HasBuildStep = hasBuildScript
+
+	if startEntrypoint != "" {
+		plan.Entrypoint = startEntrypoint
+		return plan
+	}
+	if mainEntry := sanitizeRelativeEntrypoint(pkg.Main); mainEntry != "" {
+		plan.Entrypoint = mainEntry
+		return plan
+	}
+
+	if sourceDir != "" {
+		for _, candidate := range []string{"server.js", "app.js", "index.js"} {
+			if _, err := os.Stat(filepath.Join(sourceDir, candidate)); err == nil {
+				plan.Entrypoint = candidate
+				return plan
+			}
+		}
+	}
+
+	return plan
+}
+
+type pythonBuildPlan struct {
+	UsePyprojectOnly bool
+	Framework        string
+	EntrypointFile   string
+	EntrypointModule string
+}
+
+func containsPythonPackage(depText, pkgName string) bool {
+	for _, line := range strings.Split(strings.ToLower(depText), "\n") {
+		if idx := strings.Index(line, "#"); idx != -1 {
+			line = line[:idx]
+		}
+		tokens := strings.FieldsFunc(line, func(r rune) bool {
+			return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_')
+		})
+		for _, tok := range tokens {
+			if tok == pkgName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func detectPythonBuildPlan(sourceDir string) pythonBuildPlan {
+	plan := pythonBuildPlan{
+		EntrypointFile:   "app.py",
+		EntrypointModule: "app",
+	}
+	if sourceDir == "" {
+		return plan
+	}
+
+	reqPath := filepath.Join(sourceDir, "requirements.txt")
+	pyprojPath := filepath.Join(sourceDir, "pyproject.toml")
+
+	reqData, reqErr := os.ReadFile(reqPath)
+	pyprojData, pyprojErr := os.ReadFile(pyprojPath)
+
+	hasReq := reqErr == nil
+	hasPyproj := pyprojErr == nil
+	plan.UsePyprojectOnly = !hasReq && hasPyproj
+
+	combinedDeps := string(reqData) + "\n" + string(pyprojData)
+	switch {
+	case containsPythonPackage(combinedDeps, "fastapi") || containsPythonPackage(combinedDeps, "uvicorn"):
+		plan.Framework = "uvicorn"
+	case containsPythonPackage(combinedDeps, "gunicorn"):
+		plan.Framework = "gunicorn"
+	}
+
+	candidates := []string{"main.py", "app.py", "server.py", "wsgi.py"}
+	if plan.Framework == "gunicorn" {
+		candidates = []string{"wsgi.py", "app.py", "main.py", "server.py"}
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(filepath.Join(sourceDir, candidate)); err == nil {
+			plan.EntrypointFile = candidate
+			plan.EntrypointModule = strings.TrimSuffix(candidate, ".py")
+			return plan
+		}
+	}
+
+	return plan
+}
+
 func (b *CNBBuilder) synthesizeDockerfile(det *DetectionResult) (string, error) {
 	return b.synthesizeDockerfileForDir(det, ".")
 }
@@ -408,7 +618,39 @@ ENTRYPOINT ["/app/server"]
 `, goVer), nil
 
 	case RuntimeNodeJS:
-		return `FROM node:20-alpine AS builder
+		plan := detectNodeBuildPlan(sourceDir)
+		if plan.IsSPA {
+			return fmt.Sprintf(`FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci || npm install
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+RUN printf 'server {\n    listen 80;\n    server_name _;\n    root /usr/share/nginx/html;\n    index index.html;\n    location / {\n        try_files $uri $uri/ /index.html;\n    }\n}\n' > /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/%s /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+`, plan.OutputDir), nil
+		}
+		if plan.HasBuildStep {
+			return fmt.Sprintf(`FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci || npm install
+COPY . .
+RUN npm run build
+RUN npm prune --omit=dev || true
+
+FROM gcr.io/distroless/nodejs20-debian12:nonroot
+USER nonroot:nonroot
+WORKDIR /app
+COPY --from=builder /app /app
+ENTRYPOINT ["node", %q]
+`, plan.Entrypoint), nil
+		}
+		return fmt.Sprintf(`FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production || npm install --production
@@ -418,14 +660,34 @@ FROM gcr.io/distroless/nodejs20-debian12:nonroot
 USER nonroot:nonroot
 WORKDIR /app
 COPY --from=builder /app /app
-ENTRYPOINT ["node", "index.js"]
-`, nil
+ENTRYPOINT ["node", %q]
+`, plan.Entrypoint), nil
 
 	case RuntimePython:
-		return `FROM python:3.11-slim AS builder
+		plan := detectPythonBuildPlan(sourceDir)
+		builderStage := `FROM python:3.11-slim AS builder
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt || true
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt || true`
+		if plan.UsePyprojectOnly {
+			builderStage = `FROM python:3.11-slim AS builder
+WORKDIR /app
+COPY pyproject.toml ./
+COPY . .
+RUN pip install --no-cache-dir --prefix=/install . || true`
+		}
+
+		var cmdLine string
+		switch plan.Framework {
+		case "uvicorn":
+			cmdLine = fmt.Sprintf(`CMD ["uvicorn", "%s:app", "--host", "0.0.0.0", "--port", "8000"]`, plan.EntrypointModule)
+		case "gunicorn":
+			cmdLine = fmt.Sprintf(`CMD ["gunicorn", "--bind", "0.0.0.0:8000", "%s:app"]`, plan.EntrypointModule)
+		default:
+			cmdLine = fmt.Sprintf(`CMD ["python", %q]`, plan.EntrypointFile)
+		}
+
+		return fmt.Sprintf(`%s
 
 FROM python:3.11-slim
 WORKDIR /app
@@ -433,8 +695,8 @@ COPY --from=builder /install /usr/local
 COPY . .
 RUN useradd -u 10001 appuser && chown -R appuser /app
 USER appuser
-CMD ["python", "app.py"]
-`, nil
+%s
+`, builderStage, cmdLine), nil
 
 	default:
 		return "", fmt.Errorf("unsupported runtime '%s' without Dockerfile; please supply a Dockerfile or install pack", det.Runtime)

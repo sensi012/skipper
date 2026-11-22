@@ -427,3 +427,203 @@ func TestBuild_SynthesizedDockerfileFallback(t *testing.T) {
 		}
 	})
 }
+
+func TestSmartNodeDockerfileSynthesis(t *testing.T) {
+	builder := NewCNBBuilder()
+	det := &DetectionResult{Runtime: RuntimeNodeJS}
+
+	t.Run("Vite SPA synthesizes node builder + nginx alpine with /app/dist", func(t *testing.T) {
+		dir := t.TempDir()
+		pkg := `{
+			"name": "dashboard",
+			"scripts": {"dev": "vite", "build": "vite build"},
+			"dependencies": {"react": "^18.2.0"},
+			"devDependencies": {"vite": "^5.0.0"}
+		}`
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0644); err != nil {
+			t.Fatal(err)
+		}
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, want := range []string{
+			"FROM node:20-alpine AS builder",
+			"RUN npm run build",
+			"FROM nginx:alpine",
+			"COPY --from=builder /app/dist /usr/share/nginx/html",
+			"try_files $uri $uri/ /index.html;",
+		} {
+			if !strings.Contains(df, want) {
+				t.Errorf("expected %q in Vite SPA Dockerfile:\n%s", want, df)
+			}
+		}
+	})
+
+	t.Run("CRA react-scripts SPA synthesizes nginx alpine with /app/build", func(t *testing.T) {
+		dir := t.TempDir()
+		pkg := `{
+			"name": "portal",
+			"scripts": {"start": "react-scripts start", "build": "react-scripts build"},
+			"dependencies": {"react": "^18.2.0", "react-scripts": "5.0.1"}
+		}`
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0644); err != nil {
+			t.Fatal(err)
+		}
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, want := range []string{
+			"FROM nginx:alpine",
+			"COPY --from=builder /app/build /usr/share/nginx/html",
+			"try_files $uri $uri/ /index.html;",
+		} {
+			if !strings.Contains(df, want) {
+				t.Errorf("expected %q in CRA SPA Dockerfile:\n%s", want, df)
+			}
+		}
+	})
+
+	t.Run("Node backend uses package.json main field", func(t *testing.T) {
+		dir := t.TempDir()
+		pkg := `{"name": "api", "main": "./server.js"}`
+		_ = os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0644)
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(df, `ENTRYPOINT ["node", "server.js"]`) || !strings.Contains(df, "distroless/nodejs20") {
+			t.Fatalf("unexpected Node backend Dockerfile:\n%s", df)
+		}
+	})
+
+	t.Run("Node TypeScript backend runs build, prunes dev deps, uses scripts.start entrypoint", func(t *testing.T) {
+		dir := t.TempDir()
+		pkg := `{
+			"name": "ts-api",
+			"main": "dist/index.js",
+			"scripts": {
+				"build": "tsc",
+				"start": "NODE_ENV=production node --enable-source-maps dist/server.js"
+			},
+			"devDependencies": {"typescript": "^5.4.0"}
+		}`
+		_ = os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0644)
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, want := range []string{
+			"RUN npm ci || npm install",
+			"RUN npm run build",
+			"RUN npm prune --omit=dev || true",
+			"FROM gcr.io/distroless/nodejs20-debian12:nonroot",
+			`ENTRYPOINT ["node", "dist/server.js"]`,
+		} {
+			if !strings.Contains(df, want) {
+				t.Errorf("expected %q in TypeScript backend Dockerfile:\n%s", want, df)
+			}
+		}
+	})
+
+	t.Run("Node backend rejects shell metacharacters in scripts.start and falls back to file probe", func(t *testing.T) {
+		dir := t.TempDir()
+		pkg := `{
+			"name": "unsafe-api",
+			"scripts": {"start": "node server.js; rm -rf /"}
+		}`
+		_ = os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0644)
+		_ = os.WriteFile(filepath.Join(dir, "app.js"), []byte("console.log('hi')"), 0644)
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(df, "rm -rf") || !strings.Contains(df, `ENTRYPOINT ["node", "app.js"]`) {
+			t.Fatalf("expected safe fallback to app.js, got:\n%s", df)
+		}
+	})
+
+	t.Run("Node backend with vite devDep but explicit node start script stays backend", func(t *testing.T) {
+		dir := t.TempDir()
+		pkg := `{
+			"name": "ssr-server",
+			"scripts": {"build": "tsc", "start": "node dist/server.js"},
+			"devDependencies": {"vite": "^5.0.0"}
+		}`
+		_ = os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0644)
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(df, "nginx:alpine") || !strings.Contains(df, `ENTRYPOINT ["node", "dist/server.js"]`) {
+			t.Fatalf("expected distroless node backend when explicit node start exists, got:\n%s", df)
+		}
+	})
+}
+
+func TestSmartPythonDockerfileSynthesis(t *testing.T) {
+	builder := NewCNBBuilder()
+	det := &DetectionResult{Runtime: RuntimePython}
+
+	t.Run("pyproject.toml-only with FastAPI and main.py", func(t *testing.T) {
+		dir := t.TempDir()
+		pyproject := `[project]
+name = "orders-api"
+dependencies = ["fastapi>=0.110", "uvicorn>=0.27"]
+`
+		_ = os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(pyproject), 0644)
+		_ = os.WriteFile(filepath.Join(dir, "main.py"), []byte("from fastapi import FastAPI\napp = FastAPI()\n"), 0644)
+
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(df, "COPY requirements.txt") {
+			t.Fatalf("pyproject-only project must not COPY requirements.txt:\n%s", df)
+		}
+		for _, want := range []string{
+			"COPY pyproject.toml ./",
+			"RUN pip install --no-cache-dir --prefix=/install . || true",
+			`CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]`,
+		} {
+			if !strings.Contains(df, want) {
+				t.Errorf("expected %q in FastAPI pyproject Dockerfile:\n%s", want, df)
+			}
+		}
+	})
+
+	t.Run("Gunicorn with requirements.txt and wsgi.py", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask==3.0.2\ngunicorn==21.2.0\n"), 0644)
+		_ = os.WriteFile(filepath.Join(dir, "wsgi.py"), []byte("app = object()\n"), 0644)
+
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, want := range []string{
+			"COPY requirements.txt ./",
+			"RUN pip install --no-cache-dir --prefix=/install -r requirements.txt || true",
+			`CMD ["gunicorn", "--bind", "0.0.0.0:8000", "wsgi:app"]`,
+		} {
+			if !strings.Contains(df, want) {
+				t.Errorf("expected %q in Gunicorn Dockerfile:\n%s", want, df)
+			}
+		}
+	})
+
+	t.Run("Plain Python probes main.py before app.py", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("requests==2.31.0\n"), 0644)
+		_ = os.WriteFile(filepath.Join(dir, "main.py"), []byte("print('ok')\n"), 0644)
+
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(df, `CMD ["python", "main.py"]`) {
+			t.Fatalf("expected main.py entrypoint, got:\n%s", df)
+		}
+	})
+}
