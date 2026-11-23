@@ -105,4 +105,10 @@ Exit codes: `0` if all evaluated entries passed with zero panics, `1` if any fai
 
 ## GitHub Actions (Manual Trigger)
 
-Use [`.github/workflows/realworld.yaml`](../.github/workflows/realworld.yaml) via **Actions → Real-World Verification → Run workflow** to execute the full suite on `ubuntu-latest` and download the `realworld-results` artifact.
+Use [`.github/workflows/realworld.yaml`](../.github/workflows/realworld.yaml) via **Actions → Real-World Verification → Run workflow** to execute both jobs on `ubuntu-latest`:
+
+- **`realworld`**: Runs [run-realworld.ps1](../scripts/realworld/run-realworld.ps1) across all 13 public repos and failure fixtures (including `awesome-nginx-golang-postgres`) and uploads the `realworld-results` artifact.
+- **`user-checks`**: Runs [verify-user-checks.sh](../scripts/realworld/verify-user-checks.sh) covering:
+  1. Clean Ubuntu `curl | bash` GitHub Release installation + non-root source installation via `./scripts/install.sh`
+  2. Throwaway `kind` Kubernetes cluster lifecycle (`manifest` → `up` → `status` → upgrade + canary `deploy` → `rollback` → `down`)
+  3. Failure ergonomics (Docker unreachable, host port collision, and `SIGINT` mid-build)

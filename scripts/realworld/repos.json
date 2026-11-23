@@ -8,12 +8,12 @@
     "notes": "3-tier React + Express + MongoDB Compose stack"
   },
   {
-    "name": "awesome-nginx-flask-mysql",
+    "name": "awesome-nginx-golang-postgres",
     "url": "https://github.com/docker/awesome-compose.git",
-    "subdir": "nginx-flask-mysql",
+    "subdir": "nginx-golang-postgres",
     "kind": "compose",
     "expect": "pass",
-    "notes": "3-tier Nginx + Flask + MySQL Compose stack"
+    "notes": "3-tier Nginx + Go + PostgreSQL Compose stack with healthchecks and secrets"
   },
   {
     "name": "awesome-fastapi",

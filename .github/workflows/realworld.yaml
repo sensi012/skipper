@@ -58,3 +58,39 @@ jobs:
           name: realworld-results
           path: realworld-results/
           retention-days: 14
+
+  user-checks:
+    name: Clean Install, K8s kind & Failure Ergonomics
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Skipper Binary
+        run: mkdir -p bin && go build -o bin/skipper ./cmd/skipper
+
+      - name: Run User-Level Verification Checks
+        shell: bash
+        run: bash scripts/realworld/verify-user-checks.sh
+
+      - name: Publish User-Checks Summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f realworld-results/user-checks/summary.md ]; then
+            cat realworld-results/user-checks/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload User-Check Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: user-checks-results
+          path: realworld-results/user-checks/
+          retention-days: 14

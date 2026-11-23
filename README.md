@@ -16,14 +16,14 @@
 
 **Linux & macOS:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sensi012/skipper/master/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sensi012/skipper/main/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-iwr -useb https://raw.githubusercontent.com/sensi012/skipper/master/scripts/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/sensi012/skipper/main/scripts/install.ps1 | iex
 ```
-*(Pre-built Windows binaries are also available in [`bin/`](bin/), with cross-platform release artifacts built via [`.github/workflows/release.yaml`](.github/workflows/release.yaml), Homebrew [`Formula/skipper.rb`](Formula/skipper.rb), Scoop, and Winget.)*
+*(Downloads SHA256-verified binaries for Linux/macOS/Windows via [GitHub Releases](.github/workflows/release.yaml), or builds from source when run inside a cloned repository. Package manifests are also provided for Homebrew [`Formula/skipper.rb`](Formula/skipper.rb), Scoop, and Winget.)*
 
 ### 2. Verify Your Environment
 ```bash
