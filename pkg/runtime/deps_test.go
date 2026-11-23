@@ -369,30 +369,39 @@ func TestDockerStopCleansUpDependencies(t *testing.T) {
 		var calls [][]string
 		d := &DockerAdapter{
 			execCommand: makeFakeExec([]fakeStep{
-				{exitCode: 0},                           // docker stop orders
-				{stdout: "dep-1\ndep-2\n", exitCode: 0}, // docker ps -aq --filter label=skipper.parent=orders
-				{exitCode: 0},                           // docker rm -f dep-1 dep-2
-				{exitCode: 0},                           // docker network rm skipper-orders-net
+				// docker stop orders
+				{exitCode: 0},
+				// docker rm -f orders
+				{exitCode: 0},
+				// docker ps -aq --filter label=skipper.parent=orders
+				{stdout: "dep-1\ndep-2\n", exitCode: 0},
+				// docker rm -f dep-1 dep-2
+				{exitCode: 0},
+				// docker network rm skipper-orders-net
+				{exitCode: 0},
 			}, &calls),
 		}
 
 		if err := d.Stop(context.Background(), "orders"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(calls) != 4 {
-			t.Fatalf("expected 4 docker calls, got %d: %v", len(calls), calls)
+		if len(calls) != 5 {
+			t.Fatalf("expected 5 docker calls, got %d: %v", len(calls), calls)
 		}
 		if strings.Join(calls[0], " ") != "docker stop orders" {
 			t.Fatalf("unexpected stop call: %v", calls[0])
 		}
-		if strings.Join(calls[1], " ") != "docker ps -aq --filter label=skipper.parent=orders" {
-			t.Fatalf("unexpected ps filter call: %v", calls[1])
+		if strings.Join(calls[1], " ") != "docker rm -f orders" {
+			t.Fatalf("unexpected main rm call: %v", calls[1])
 		}
-		if strings.Join(calls[2], " ") != "docker rm -f dep-1 dep-2" {
-			t.Fatalf("unexpected rm call: %v", calls[2])
+		if strings.Join(calls[2], " ") != "docker ps -aq --filter label=skipper.parent=orders" {
+			t.Fatalf("unexpected ps filter call: %v", calls[2])
 		}
-		if strings.Join(calls[3], " ") != "docker network rm skipper-orders-net" {
-			t.Fatalf("unexpected network rm call: %v", calls[3])
+		if strings.Join(calls[3], " ") != "docker rm -f dep-1 dep-2" {
+			t.Fatalf("unexpected rm call: %v", calls[3])
+		}
+		if strings.Join(calls[4], " ") != "docker network rm skipper-orders-net" {
+			t.Fatalf("unexpected network rm call: %v", calls[4])
 		}
 	})
 

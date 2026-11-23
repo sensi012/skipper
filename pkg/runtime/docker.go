@@ -311,6 +311,9 @@ func (d *DockerAdapter) Stop(ctx context.Context, workloadName string) error {
 		return err
 	}
 
+	// Best-effort removal of stopped main container so single-service down matches Compose semantics
+	_ = d.command(ctx, "docker", "rm", "-f", workloadName).Run()
+
 	// Best-effort cleanup of any dependency containers labeled with skipper.parent=<workloadName>
 	out, err := d.command(ctx, "docker", "ps", "-aq", "--filter", fmt.Sprintf("label=skipper.parent=%s", workloadName)).Output()
 	if err == nil {

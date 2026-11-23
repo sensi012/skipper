@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/sensi012/skipper/pkg/config"
@@ -530,10 +532,51 @@ func detectNodeBuildPlan(sourceDir string) nodeBuildPlan {
 }
 
 type pythonBuildPlan struct {
-	UsePyprojectOnly bool
-	Framework        string
-	EntrypointFile   string
-	EntrypointModule string
+	UsePyprojectOnly   bool
+	PythonVersion      string
+	Framework          string
+	EntrypointFile     string
+	EntrypointModule   string
+	EntrypointCallable string
+}
+
+var (
+	rePythonMinor   = regexp.MustCompile(`(?:^|\D)(3\.(\d+))`)
+	reRequiresPyTom = regexp.MustCompile(`(?i)requires-python\s*=\s*["'][^"']*(3\.(\d+))`)
+)
+
+func parseSupportedPythonMinor(verStr, minorStr string) (string, bool) {
+	minor, err := strconv.Atoi(minorStr)
+	if err != nil || minor < 8 || minor > 20 {
+		return "", false
+	}
+	return verStr, true
+}
+
+func detectPythonVersion(sourceDir string) string {
+	const defaultPythonVersion = "3.12"
+	if sourceDir == "" {
+		return defaultPythonVersion
+	}
+
+	if pvData, err := os.ReadFile(filepath.Join(sourceDir, ".python-version")); err == nil {
+		trimmed := strings.TrimSpace(string(pvData))
+		if m := rePythonMinor.FindStringSubmatch(trimmed); len(m) == 3 {
+			if ver, ok := parseSupportedPythonMinor(m[1], m[2]); ok {
+				return ver
+			}
+		}
+	}
+
+	if pyprojData, err := os.ReadFile(filepath.Join(sourceDir, "pyproject.toml")); err == nil {
+		if m := reRequiresPyTom.FindStringSubmatch(string(pyprojData)); len(m) == 3 {
+			if ver, ok := parseSupportedPythonMinor(m[1], m[2]); ok {
+				return ver
+			}
+		}
+	}
+
+	return defaultPythonVersion
 }
 
 func containsPythonPackage(depText, pkgName string) bool {
@@ -555,8 +598,10 @@ func containsPythonPackage(depText, pkgName string) bool {
 
 func detectPythonBuildPlan(sourceDir string) pythonBuildPlan {
 	plan := pythonBuildPlan{
-		EntrypointFile:   "app.py",
-		EntrypointModule: "app",
+		PythonVersion:      detectPythonVersion(sourceDir),
+		EntrypointFile:     "app.py",
+		EntrypointModule:   "app",
+		EntrypointCallable: "app",
 	}
 	if sourceDir == "" {
 		return plan
@@ -589,6 +634,36 @@ func detectPythonBuildPlan(sourceDir string) pythonBuildPlan {
 			plan.EntrypointFile = candidate
 			plan.EntrypointModule = strings.TrimSuffix(candidate, ".py")
 			return plan
+		}
+	}
+
+	if plan.Framework == "gunicorn" {
+		entries, err := os.ReadDir(sourceDir)
+		if err == nil {
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].Name() < entries[j].Name()
+			})
+			for _, ent := range entries {
+				if !ent.IsDir() {
+					continue
+				}
+				name := ent.Name()
+				if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") ||
+					name == "venv" || name == ".venv" || name == "node_modules" {
+					continue
+				}
+				wsgiPath := filepath.Join(sourceDir, name, "wsgi.py")
+				if wsgiData, err := os.ReadFile(wsgiPath); err == nil {
+					plan.EntrypointModule = name + ".wsgi"
+					content := string(wsgiData)
+					if strings.Contains(content, "app =") && !strings.Contains(content, "application") {
+						plan.EntrypointCallable = "app"
+					} else {
+						plan.EntrypointCallable = "application"
+					}
+					return plan
+				}
+			}
 		}
 	}
 
@@ -647,7 +722,7 @@ FROM gcr.io/distroless/nodejs20-debian12:nonroot
 USER nonroot:nonroot
 WORKDIR /app
 COPY --from=builder /app /app
-ENTRYPOINT ["node", %q]
+ENTRYPOINT ["/nodejs/bin/node", %q]
 `, plan.Entrypoint), nil
 		}
 		return fmt.Sprintf(`FROM node:20-alpine AS builder
@@ -660,21 +735,22 @@ FROM gcr.io/distroless/nodejs20-debian12:nonroot
 USER nonroot:nonroot
 WORKDIR /app
 COPY --from=builder /app /app
-ENTRYPOINT ["node", %q]
+ENTRYPOINT ["/nodejs/bin/node", %q]
 `, plan.Entrypoint), nil
 
 	case RuntimePython:
 		plan := detectPythonBuildPlan(sourceDir)
-		builderStage := `FROM python:3.11-slim AS builder
+		pyImage := fmt.Sprintf("python:%s-slim", plan.PythonVersion)
+		builderStage := fmt.Sprintf(`FROM %s AS builder
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt || true`
+RUN mkdir -p /install && pip install --no-cache-dir --prefix=/install -r requirements.txt`, pyImage)
 		if plan.UsePyprojectOnly {
-			builderStage = `FROM python:3.11-slim AS builder
+			builderStage = fmt.Sprintf(`FROM %s AS builder
 WORKDIR /app
 COPY pyproject.toml ./
 COPY . .
-RUN pip install --no-cache-dir --prefix=/install . || true`
+RUN mkdir -p /install && pip install --no-cache-dir --prefix=/install .`, pyImage)
 		}
 
 		var cmdLine string
@@ -682,21 +758,21 @@ RUN pip install --no-cache-dir --prefix=/install . || true`
 		case "uvicorn":
 			cmdLine = fmt.Sprintf(`CMD ["uvicorn", "%s:app", "--host", "0.0.0.0", "--port", "8000"]`, plan.EntrypointModule)
 		case "gunicorn":
-			cmdLine = fmt.Sprintf(`CMD ["gunicorn", "--bind", "0.0.0.0:8000", "%s:app"]`, plan.EntrypointModule)
+			cmdLine = fmt.Sprintf(`CMD ["gunicorn", "--bind", "0.0.0.0:8000", "%s:%s"]`, plan.EntrypointModule, plan.EntrypointCallable)
 		default:
 			cmdLine = fmt.Sprintf(`CMD ["python", %q]`, plan.EntrypointFile)
 		}
 
 		return fmt.Sprintf(`%s
 
-FROM python:3.11-slim
+FROM %s
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY . .
 RUN useradd -u 10001 appuser && chown -R appuser /app
 USER appuser
 %s
-`, builderStage, cmdLine), nil
+`, builderStage, pyImage, cmdLine), nil
 
 	default:
 		return "", fmt.Errorf("unsupported runtime '%s' without Dockerfile; please supply a Dockerfile or install pack", det.Runtime)

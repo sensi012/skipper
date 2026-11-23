@@ -290,13 +290,22 @@ func TestDockerAdapterLifecycle(t *testing.T) {
 	t.Run("Stop", func(t *testing.T) {
 		var calls [][]string
 		d := &DockerAdapter{
-			execCommand: makeFakeExec([]fakeStep{{exitCode: 0}}, &calls),
+			execCommand: makeFakeExec([]fakeStep{
+				{exitCode: 0},
+				{exitCode: 0},
+			}, &calls),
 		}
 		if err := d.Stop(context.Background(), "api"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		if len(calls) < 2 {
+			t.Fatalf("expected at least 2 docker calls (stop + rm), got %d: %v", len(calls), calls)
+		}
 		if strings.Join(calls[0], " ") != "docker stop api" {
 			t.Fatalf("unexpected stop command: %v", calls[0])
+		}
+		if strings.Join(calls[1], " ") != "docker rm -f api" {
+			t.Fatalf("unexpected rm command: %v", calls[1])
 		}
 	})
 

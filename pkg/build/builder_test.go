@@ -493,7 +493,7 @@ func TestSmartNodeDockerfileSynthesis(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(df, `ENTRYPOINT ["node", "server.js"]`) || !strings.Contains(df, "distroless/nodejs20") {
+		if !strings.Contains(df, `ENTRYPOINT ["/nodejs/bin/node", "server.js"]`) || !strings.Contains(df, "distroless/nodejs20") {
 			t.Fatalf("unexpected Node backend Dockerfile:\n%s", df)
 		}
 	})
@@ -519,7 +519,7 @@ func TestSmartNodeDockerfileSynthesis(t *testing.T) {
 			"RUN npm run build",
 			"RUN npm prune --omit=dev || true",
 			"FROM gcr.io/distroless/nodejs20-debian12:nonroot",
-			`ENTRYPOINT ["node", "dist/server.js"]`,
+			`ENTRYPOINT ["/nodejs/bin/node", "dist/server.js"]`,
 		} {
 			if !strings.Contains(df, want) {
 				t.Errorf("expected %q in TypeScript backend Dockerfile:\n%s", want, df)
@@ -539,7 +539,7 @@ func TestSmartNodeDockerfileSynthesis(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if strings.Contains(df, "rm -rf") || !strings.Contains(df, `ENTRYPOINT ["node", "app.js"]`) {
+		if strings.Contains(df, "rm -rf") || !strings.Contains(df, `ENTRYPOINT ["/nodejs/bin/node", "app.js"]`) {
 			t.Fatalf("expected safe fallback to app.js, got:\n%s", df)
 		}
 	})
@@ -556,7 +556,7 @@ func TestSmartNodeDockerfileSynthesis(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if strings.Contains(df, "nginx:alpine") || !strings.Contains(df, `ENTRYPOINT ["node", "dist/server.js"]`) {
+		if strings.Contains(df, "nginx:alpine") || !strings.Contains(df, `ENTRYPOINT ["/nodejs/bin/node", "dist/server.js"]`) {
 			t.Fatalf("expected distroless node backend when explicit node start exists, got:\n%s", df)
 		}
 	})
@@ -570,6 +570,7 @@ func TestSmartPythonDockerfileSynthesis(t *testing.T) {
 		dir := t.TempDir()
 		pyproject := `[project]
 name = "orders-api"
+requires-python = ">=3.12"
 dependencies = ["fastapi>=0.110", "uvicorn>=0.27"]
 `
 		_ = os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(pyproject), 0644)
@@ -582,14 +583,34 @@ dependencies = ["fastapi>=0.110", "uvicorn>=0.27"]
 		if strings.Contains(df, "COPY requirements.txt") {
 			t.Fatalf("pyproject-only project must not COPY requirements.txt:\n%s", df)
 		}
+		if strings.Contains(df, "|| true") {
+			t.Fatalf("pip install must not swallow failures with || true:\n%s", df)
+		}
 		for _, want := range []string{
+			"FROM python:3.12-slim AS builder",
 			"COPY pyproject.toml ./",
-			"RUN pip install --no-cache-dir --prefix=/install . || true",
+			"RUN mkdir -p /install && pip install --no-cache-dir --prefix=/install .",
+			"FROM python:3.12-slim",
 			`CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]`,
 		} {
 			if !strings.Contains(df, want) {
 				t.Errorf("expected %q in FastAPI pyproject Dockerfile:\n%s", want, df)
 			}
+		}
+	})
+
+	t.Run("detects Python version from .python-version", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, ".python-version"), []byte("3.13.2\n"), 0644)
+		_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask==3.0.2\n"), 0644)
+		_ = os.WriteFile(filepath.Join(dir, "app.py"), []byte("print('ok')\n"), 0644)
+
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(df, "FROM python:3.13-slim AS builder") || !strings.Contains(df, "\nFROM python:3.13-slim\n") {
+			t.Fatalf("expected python:3.13-slim from .python-version, got:\n%s", df)
 		}
 	})
 
@@ -602,14 +623,35 @@ dependencies = ["fastapi>=0.110", "uvicorn>=0.27"]
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		if strings.Contains(df, "|| true") {
+			t.Fatalf("pip install must not swallow failures with || true:\n%s", df)
+		}
 		for _, want := range []string{
+			"FROM python:3.12-slim AS builder",
 			"COPY requirements.txt ./",
-			"RUN pip install --no-cache-dir --prefix=/install -r requirements.txt || true",
+			"RUN mkdir -p /install && pip install --no-cache-dir --prefix=/install -r requirements.txt",
 			`CMD ["gunicorn", "--bind", "0.0.0.0:8000", "wsgi:app"]`,
 		} {
 			if !strings.Contains(df, want) {
 				t.Errorf("expected %q in Gunicorn Dockerfile:\n%s", want, df)
 			}
+		}
+	})
+
+	t.Run("Django subdir wsgi.py uses subdir.wsgi:application", func(t *testing.T) {
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("django>=6.1,<6.2\ngunicorn>=23.0\n"), 0644)
+		_ = os.WriteFile(filepath.Join(dir, "manage.py"), []byte("#!/usr/bin/env python\n"), 0644)
+		pkgDir := filepath.Join(dir, "gettingstarted")
+		_ = os.MkdirAll(pkgDir, 0755)
+		_ = os.WriteFile(filepath.Join(pkgDir, "wsgi.py"), []byte("from django.core.wsgi import get_wsgi_application\napplication = get_wsgi_application()\n"), 0644)
+
+		df, err := builder.synthesizeDockerfileForDir(det, dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(df, `CMD ["gunicorn", "--bind", "0.0.0.0:8000", "gettingstarted.wsgi:application"]`) {
+			t.Fatalf("expected gettingstarted.wsgi:application entrypoint, got:\n%s", df)
 		}
 	})
 
