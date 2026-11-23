@@ -173,14 +173,22 @@ func TestDockerDeployWithDependencies(t *testing.T) {
 		var calls [][]string
 		d := &DockerAdapter{
 			execCommand: makeFakeExec([]fakeStep{
-				{exitCode: 0},                           // docker network create
-				{exitCode: 0},                           // docker rm -f orders-db
-				{stdout: "db-container\n", exitCode: 0}, // docker run db
-				{exitCode: 0},                           // docker rm -f orders-cache-1
-				{stdout: "cache-container\n", exitCode: 0}, // docker run cache-1
-				{exitCode: 0},                            // docker rm -f orders
-				{stdout: "app-container\n", exitCode: 0}, // docker run orders
-				{stdout: "running|true|2026-11-21T06:00:00Z", exitCode: 0}, // docker inspect
+				// docker network create
+				{exitCode: 0},
+				// docker rm -f orders-db
+				{exitCode: 0},
+				// docker run db
+				{stdout: "db-container\n", exitCode: 0},
+				// docker rm -f orders-cache-1
+				{exitCode: 0},
+				// docker run cache-1
+				{stdout: "cache-container\n", exitCode: 0},
+				// docker rm -f orders
+				{exitCode: 0},
+				// docker run orders
+				{stdout: "app-container\n", exitCode: 0},
+				// docker inspect
+				{stdout: "running|true|2026-11-21T06:00:00Z", exitCode: 0},
 			}, &calls),
 		}
 
