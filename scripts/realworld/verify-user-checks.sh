@@ -292,8 +292,8 @@ fi
 # -----------------------------------------------------------------------------
 C3B_LOG="${OUT_DIR}/check-3b-port-collision.log"
 run_port_collision_check() {
-  local port_pid=""
-  trap 'if [ -n "${port_pid}" ]; then kill "${port_pid}" >/dev/null 2>&1 || true; fi; docker rm -f err-port-test >/dev/null 2>&1 || true' EXIT
+  PORT_PID=""
+  trap 'if [ -n "${PORT_PID:-}" ]; then kill "${PORT_PID}" >/dev/null 2>&1 || true; wait "${PORT_PID}" >/dev/null 2>&1 || true; fi; docker rm -f err-port-test >/dev/null 2>&1 || true' EXIT
 
   local app_dir="${TMP_WORK}/err-port"
   mkdir -p "${app_dir}"
@@ -314,7 +314,7 @@ security:
 EOF
   docker pull -q alpine:3.20 >/dev/null
   python3 -c 'import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("0.0.0.0", 18999)); s.listen(1); time.sleep(60)' &
-  port_pid=$!
+  PORT_PID=$!
   sleep 1
 
   cd "${app_dir}"
