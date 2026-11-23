@@ -21,6 +21,7 @@ Thumbs.db
 .app-platform/
 *.env
 !.env.example
+!**/testdata/**/.env
 secrets.env
 
 # IDE & Editor folders
