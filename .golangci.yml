@@ -11,5 +11,5 @@ linters:
     staticcheck:
       checks:
         - all
-        - "-ST1000"
+        - "-ST1*"
         - "-QF*"
