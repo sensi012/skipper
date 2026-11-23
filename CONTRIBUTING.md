@@ -7,7 +7,8 @@ Thank you for your interest in contributing to the Skipper project!
 1. **Prerequisites**:
    - Go 1.25+
    - Docker Engine or Docker Desktop
-   - `kubectl` and `kind` (optional for local cluster testing)
+   - `kubectl` and `kind` (optional for local Kubernetes testing)
+   - `golangci-lint` v2 (optional for running CI lint locally)
 
 2. **Clone and Build**:
    ```bash
@@ -16,13 +17,19 @@ Thank you for your interest in contributing to the Skipper project!
    go build -o bin/skipper ./cmd/skipper
    ```
 
-3. **Running Tests**:
+3. **Running Checks (matches CI)**:
    ```bash
-   go test -v ./...
+   gofmt -l .
+   go vet ./...
+   go test -race -count=1 ./...
+   golangci-lint run
+   go run golang.org/x/vuln/cmd/govulncheck@latest ./...
    ```
+
+   For real-world Docker, Docker Compose, and `kind` end-to-end verification, see [Real-World Integration Testing](docs/realworld-testing.md).
 
 ## Pull Request Guidelines
 
-- Ensure all existing and new tests pass.
+- Ensure `gofmt`, `go vet`, `-race` tests, and `golangci-lint` (see [`.golangci.yml`](.golangci.yml)) pass before opening a PR.
 - Maintain convention over configuration: keep `skipper.yaml` declarative and minimal.
-- When adding diagnostic detectors, adhere to the `Detector` interface in `pkg/diagnostics/engine.go`.
+- When adding diagnostic detectors, adhere to the `Detector` interface in [`pkg/diagnostics/engine.go`](pkg/diagnostics/engine.go).

@@ -19,7 +19,7 @@
    - Automated remediation strictly requires policy-controlled verification gates and human approvals in production.
 
 5. **Strong Defaults, Principled Escape Hatches:**
-   - Developers write $< 30$ lines of declarative intent (`skipper.yaml`) or reuse an existing `docker-compose.yml`.
+   - Developers write < 30 lines of declarative intent (`skipper.yaml`) or reuse an existing `docker-compose.yml`.
    - The platform auto-synthesizes resource boundaries, probes, security contexts, and isolation policies, while providing clean override patches.
 
 ---
@@ -40,7 +40,7 @@
 - [x] **Step 1.1: Initialize Modular Go CLI Architecture**
   - Built unified Cobra CLI framework ([`cmd/skipper/main.go`](../cmd/skipper/main.go)) with 28 standard commands and strict `--format json` output hygiene.
   - Implemented declarative config parser ([`pkg/config/spec.go`](../pkg/config/spec.go)).
-  - Compiled and verified single binary `bin/skipper.exe`.
+  - Compiled and verified cross-platform binaries (Linux, macOS, Windows).
 - [x] **Step 1.2: Dual-Target Runtime Abstraction Layer & Multi-Service Compose Delegation**
   - Implemented `RuntimeEngine` interface ([`pkg/runtime/interface.go`](../pkg/runtime/interface.go)).
   - Built `DockerAdapter` ([`pkg/runtime/docker.go`](../pkg/runtime/docker.go)) with automatic local multi-service dependency networking (`pkg/runtime/deps.go`) and `KubernetesAdapter` ([`pkg/runtime/kubernetes.go`](../pkg/runtime/kubernetes.go)).
@@ -50,9 +50,9 @@
 
 ### Phase 2: Autonomous Buildpacks & Production Manifest Synthesizer
 - [x] **Step 2.1: Multi-Language Autonomous Builder Engine & Smart Dockerfile Synthesis**
-  - Implemented `CNBBuilder` ([`pkg/build/builder.go`](../pkg/build/builder.go)) supporting Go, Node.js, Python, Rust, Java, custom Dockerfiles, Docker Compose multi-service builds, and monorepo subdirectory discovery.
-  - Added smart **Node.js** synthesis (`detectNodeBuildPlan`): detects SPA/static frontends (Vite, CRA `react-scripts`, Angular, Vue, Svelte, Parcel, Gatsby) to synthesize 2-stage `node:20-alpine` -> `nginx:alpine` SPA images (`try_files $uri $uri/ /index.html;`), and detects backend entrypoints (`scripts.start`, `main`, or `server.js`/`app.js`/`index.js`) + TypeScript `scripts.build` steps targeting `gcr.io/distroless/nodejs20-debian12:nonroot`.
-  - Added smart **Python** synthesis (`detectPythonBuildPlan`): supports `pyproject.toml`-only projects alongside `requirements.txt`, detects `fastapi`/`uvicorn` and `gunicorn`, and probes `main.py` -> `app.py` -> `server.py` -> `wsgi.py` entrypoints.
+  - Implemented `CNBBuilder` ([`pkg/build/builder.go`](../pkg/build/builder.go)) supporting Go, Node.js, Python, Rust, Java, custom Dockerfiles, Docker Compose multi-service builds, and monorepo subdirectory discovery (with synthesized Dockerfiles for Go, Node.js, and Python, and `Dockerfile`/`pack` builds for Rust & Java).
+  - Added smart **Node.js** synthesis (`detectNodeBuildPlan`): detects SPA/static frontends (Vite, CRA `react-scripts`, Angular, Vue, Svelte, Parcel, Gatsby) to synthesize 2-stage `node:20-alpine` -> `nginx:alpine` SPA images (`try_files $uri $uri/ /index.html;`), and detects backend entrypoints (`scripts.start`, `main`, or `server.js`/`app.js`/`index.js`) + TypeScript `scripts.build` steps targeting `gcr.io/distroless/nodejs20-debian12:nonroot` (`ENTRYPOINT ["/nodejs/bin/node", ...]`).
+  - Added smart **Python** synthesis (`detectPythonBuildPlan`): auto-detects Python version from `.python-version` / `requires-python` (default `3.12`), supports `pyproject.toml`-only projects alongside `requirements.txt` with fail-fast `mkdir -p /install && pip install`, detects `fastapi`/`uvicorn` and `gunicorn`, and probes `main.py` -> `app.py` -> `server.py` -> `wsgi.py` plus Django `<pkg>/wsgi.py` (`<pkg>.wsgi:application`).
 - [x] **Step 2.2: Hardened Manifest Synthesizer**
   - Implemented synthesizer ([`pkg/synthesizer/synthesizer.go`](../pkg/synthesizer/synthesizer.go)) generating Deployments, Services, NetworkPolicies, and PDBs.
 - [x] **Step 2.3: Shift-Left Vulnerability Scanner**
@@ -81,7 +81,8 @@
 ### Phase 6: Production Hardening, Automated CI & Day-2 Features
 - [x] **Step 6.1: Quality Assurance, Multi-Tier Testing & Automated Linux CI Gate**
   - 23/23 packages unit tested (100% PASS) with concurrency, path-traversal, and CLI flag-injection hardening.
-  - Automated Linux GitHub Actions CI workflow ([`.github/workflows/ci.yaml`](../.github/workflows/ci.yaml)) running `gofmt -l .`, `go vet ./...`, `go test -race -count=1 -coverprofile=coverage.out ./...`, `golangci-lint`, and `govulncheck` on every push and pull request.
+  - Automated Linux GitHub Actions CI workflow ([`.github/workflows/ci.yaml`](../.github/workflows/ci.yaml)) running `gofmt -l .`, `go vet ./...`, `go test -race -count=1 -coverprofile=coverage.out ./...`, `golangci-lint` (configured via [`.golangci.yml`](../.golangci.yml)), and `govulncheck` on every push and pull request.
+  - Automated real-world integration workflow ([`.github/workflows/realworld.yaml`](../.github/workflows/realworld.yaml)) validating 13 public Docker/Compose repos & failure fixtures alongside clean Ubuntu installs, live `kind` Kubernetes lifecycle (`deploy` -> `upgrade` -> `rollback` -> `down`), and failure ergonomics.
   - Cross-platform release pipeline ([`.github/workflows/release.yaml`](../.github/workflows/release.yaml)) producing binaries + SHA256 `checksums.txt`, plus Homebrew, Scoop, and Winget manifests.
   - End-to-end integration pipeline validated ([`test/e2e/pipeline_test.go`](../test/e2e/pipeline_test.go)) and microsecond latency benchmarks recorded ([`test/bench/benchmark_test.go`](../test/bench/benchmark_test.go)).
 - [x] **Step 6.2: Day-2 Developer Ergonomics**

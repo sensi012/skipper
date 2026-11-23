@@ -75,14 +75,16 @@ Builds OCI-compliant container images using automatic mode resolution across sin
 **Smart Multi-Stage Dockerfile Synthesis (when no `Dockerfile` exists):**
 - **Node.js (`package.json`):**
   - *SPA / Static Frontend*: Detects `scripts.build` combined with a frontend bundler/framework (`vite`, `react-scripts`, `@angular/cli`, `vue`, `@vue/cli-service`, `svelte`, `parcel`, `gatsby`) without an explicit `node <file>` start script. Synthesizes a 2-stage build (`node:20-alpine` running `npm ci || npm install` + `npm run build` -> `nginx:alpine` serving `/app/dist` or `/app/build` for CRA with SPA `try_files $uri $uri/ /index.html;` routing).
-  - *Backend / API*: Extracts a validated entrypoint from `scripts.start` (`node <file>`) or `main`, falling back to probing `server.js` -> `app.js` -> `index.js`. When `scripts.build` is present (e.g., TypeScript), runs `npm ci || npm install`, `npm run build`, and `npm prune --omit=dev || true` before copying to `gcr.io/distroless/nodejs20-debian12:nonroot`.
+  - *Backend / API*: Extracts a validated entrypoint from `scripts.start` (`node <file>`) or `main`, falling back to probing `server.js` -> `app.js` -> `index.js`. When `scripts.build` is present (e.g., TypeScript), runs `npm ci || npm install`, `npm run build`, and `npm prune --omit=dev || true` before copying to `gcr.io/distroless/nodejs20-debian12:nonroot` with `ENTRYPOINT ["/nodejs/bin/node", "<entrypoint>"]`.
 - **Python (`requirements.txt` or `pyproject.toml`):**
+  - Auto-detects the target Python version (`3.8`–`3.20`) from `.python-version` or `pyproject.toml` `requires-python` (default `python:3.12-slim`), and runs fail-fast `mkdir -p /install && pip install ...` without masking pip errors.
   - Supports `pyproject.toml`-only projects cleanly (`pip install --no-cache-dir --prefix=/install .`) as well as `requirements.txt`.
-  - Automatically detects frameworks and entrypoints (`main.py` -> `app.py` -> `server.py` -> `wsgi.py`):
+  - Automatically detects frameworks and entrypoints (`main.py` -> `app.py` -> `server.py` -> `wsgi.py`, plus Django `<pkg>/wsgi.py`):
     - `fastapi` / `uvicorn` -> `CMD ["uvicorn", "<mod>:app", "--host", "0.0.0.0", "--port", "8000"]`
-    - `gunicorn` -> `CMD ["gunicorn", "--bind", "0.0.0.0:8000", "<mod>:app"]`
+    - `gunicorn` -> `CMD ["gunicorn", "--bind", "0.0.0.0:8000", "<mod>:<callable>"]` (e.g., `<pkg>.wsgi:application` for Django)
     - Default -> `CMD ["python", "<file>"]`
-- **Go, Rust & Java:** Synthesizes minimal hardened multi-stage builds targeting Distroless non-root runtime images.
+- **Go (`go.mod`):** Synthesizes minimal hardened multi-stage builds targeting `gcr.io/distroless/static-debian12:nonroot`.
+- **Rust & Java:** Auto-detected and built via your existing `Dockerfile` or Cloud Native Buildpacks (`pack`).
 
 **Flags:**
 - `--compose <path>` — Path to a Docker Compose file for multi-service builds
@@ -155,7 +157,7 @@ $ skipper up --compose docker-compose.yml --service db,backend --format json
 ```
 
 ### `skipper down`
-Stops a single-service workload (`skipper down [name]`) or tears down a Docker Compose stack (`docker compose down --remove-orphans`). Records `MUTATION` events into operational memory.
+Stops and removes a single-service workload (`skipper down [name]`, running `docker stop` + `docker rm -f`) or tears down a Docker Compose stack (`docker compose down --remove-orphans`). Records `MUTATION` events into operational memory.
 
 **Mode Resolution:**
 1. Explicit `--compose <path>`: Compose mode (requires `-r docker`).
