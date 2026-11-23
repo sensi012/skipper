@@ -42,9 +42,11 @@ jobs:
           go tool cover -func=coverage.out | tail -n 1
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
       - name: Run govulncheck
+        env:
+          GOTOOLCHAIN: auto
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
