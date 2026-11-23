@@ -135,10 +135,11 @@ func (l *OperationalMemoryLedger) RecordChange(rec *ChangeRecord) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	_, err = f.WriteString(string(data) + "\n")
-	return err
+	if _, err = f.WriteString(string(data) + "\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // RecordDebugSession saves a completed interactive debug session
@@ -168,10 +169,11 @@ func (l *OperationalMemoryLedger) recordDebugSessionLocked(sess *DebugSessionRec
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	_, err = f.WriteString(string(data) + "\n")
-	return err
+	if _, err = f.WriteString(string(data) + "\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // RecordTelemetryEvent records an eBPF or runtime signal into the causal ledger
@@ -196,10 +198,11 @@ func (l *OperationalMemoryLedger) recordTelemetryEventLocked(evt *CausalEvent) e
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	_, err = f.WriteString(string(data) + "\n")
-	return err
+	if _, err = f.WriteString(string(data) + "\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // QueryTimeline retrieves all causal events, mutations, and debug sessions within a time window

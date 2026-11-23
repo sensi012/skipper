@@ -274,7 +274,7 @@ func (c *VaultSyncClient) Push(ctx context.Context, mount, secretPath string, se
 	if err != nil {
 		return fmt.Errorf("vault push request failed: %s", sanitizeVaultError(err.Error(), c.Token))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -306,7 +306,7 @@ func (c *VaultSyncClient) Pull(ctx context.Context, mount, secretPath string) (m
 	if err != nil {
 		return nil, fmt.Errorf("vault pull request failed: %s", sanitizeVaultError(err.Error(), c.Token))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {

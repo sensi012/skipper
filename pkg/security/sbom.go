@@ -265,7 +265,7 @@ func parseGoMod(path string) ([]SBOMComponent, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var comps []SBOMComponent
 	inRequire := false
@@ -351,7 +351,7 @@ func parseRequirementsTxt(path string) ([]SBOMComponent, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var comps []SBOMComponent
 	scanner := bufio.NewScanner(f)

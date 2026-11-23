@@ -40,9 +40,8 @@ func TestOperationalMemoryLedger(t *testing.T) {
 	}
 
 	// Expired Window Check
-	eventsOld, err := ledger.QueryTimeline("my-app", 1*time.Millisecond)
 	time.Sleep(2 * time.Millisecond)
-	eventsOld, err = ledger.QueryTimeline("my-app", 1*time.Millisecond)
+	eventsOld, err := ledger.QueryTimeline("my-app", 1*time.Millisecond)
 	if err != nil {
 		t.Fatalf("failed to query timeline: %v", err)
 	}

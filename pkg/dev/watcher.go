@@ -49,7 +49,7 @@ func (d *DevServer) Start(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	if err := d.addWatchRecursive(watcher, d.opts.WatchDir); err != nil {
 		return fmt.Errorf("failed to watch directory: %w", err)

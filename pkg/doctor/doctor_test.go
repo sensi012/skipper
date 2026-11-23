@@ -28,7 +28,7 @@ func TestDoctorPortConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to listen on ephemeral port: %v", err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 
 	port := l.Addr().(*net.TCPAddr).Port
 	checks := engine.checkPortConflicts([]int{port})

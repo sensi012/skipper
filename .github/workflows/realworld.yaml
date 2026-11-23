@@ -34,11 +34,11 @@ jobs:
         env:
           ONLY_FILTER: ${{ inputs.only }}
         run: |
-          $cmdArgs = @("-Skipper", "bin/skipper")
+          $cmdParams = @{ Skipper = "bin/skipper" }
           if (-not [string]::IsNullOrWhiteSpace($env:ONLY_FILTER)) {
-            $cmdArgs += @("-Only", $env:ONLY_FILTER)
+            $cmdParams["Only"] = $env:ONLY_FILTER
           }
-          ./scripts/realworld/run-realworld.ps1 @cmdArgs
+          ./scripts/realworld/run-realworld.ps1 @cmdParams
 
       - name: Publish Step Summary
         if: always()
