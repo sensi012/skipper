@@ -174,6 +174,7 @@ Executed on standard developer hardware (`windows/amd64`, Intel Core i5 @ 2.40GH
 ## 📚 Documentation & Architecture
 
 * **[CLI Reference Manual](docs/cli-reference.md):** Complete guide to all 28 Skipper CLI commands, subcommands, flags, and 10 MCP tools.
+* **[Real-World Integration Harness](docs/realworld-testing.md):** Repeatable end-to-end validation suite across public repos and failure fixtures.
 * **[System Architecture & RFCs](docs/architecture.md):** Architectural constitution, invariant rules, and phased deliverables.
 * **[RFC 001: Intent Specification](docs/rfcs/001-skipper-intent-specification.md):** Specification syntax and Docker Compose mapping.
 * **[RFC 002: Operational Memory](docs/rfcs/002-operational-memory-models.md):** Causal event graphs and timeline models.

@@ -1,0 +1,60 @@
+name: Real-World Verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Optional comma-separated entry names from scripts/realworld/repos.json"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  realworld:
+    name: Real-World Repo Lifecycle Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Skipper Binary
+        run: mkdir -p bin && go build -o bin/skipper ./cmd/skipper
+
+      - name: Run Real-World Harness
+        shell: pwsh
+        env:
+          ONLY_FILTER: ${{ inputs.only }}
+        run: |
+          $cmdArgs = @("-Skipper", "bin/skipper")
+          if (-not [string]::IsNullOrWhiteSpace($env:ONLY_FILTER)) {
+            $cmdArgs += @("-Only", $env:ONLY_FILTER)
+          }
+          ./scripts/realworld/run-realworld.ps1 @cmdArgs
+
+      - name: Publish Step Summary
+        if: always()
+        shell: bash
+        run: |
+          latest_report=$(ls -1t realworld-results/*/report.md 2>/dev/null | head -n 1 || true)
+          if [ -n "$latest_report" ] && [ -f "$latest_report" ]; then
+            cat "$latest_report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No realworld-results/*/report.md found." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Real-World Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: realworld-results
+          path: realworld-results/
+          retention-days: 14

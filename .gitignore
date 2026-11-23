@@ -10,6 +10,7 @@ bin/
 *.out
 coverage.txt
 .coverage/
+realworld-results/
 
 # OS metadata
 .DS_Store

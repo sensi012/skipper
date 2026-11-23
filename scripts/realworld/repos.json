@@ -1,0 +1,97 @@
+[
+  {
+    "name": "awesome-react-express-mongodb",
+    "url": "https://github.com/docker/awesome-compose.git",
+    "subdir": "react-express-mongodb",
+    "kind": "compose",
+    "expect": "pass",
+    "notes": "3-tier React + Express + MongoDB Compose stack"
+  },
+  {
+    "name": "awesome-nginx-flask-mysql",
+    "url": "https://github.com/docker/awesome-compose.git",
+    "subdir": "nginx-flask-mysql",
+    "kind": "compose",
+    "expect": "pass",
+    "notes": "3-tier Nginx + Flask + MySQL Compose stack"
+  },
+  {
+    "name": "awesome-fastapi",
+    "url": "https://github.com/docker/awesome-compose.git",
+    "subdir": "fastapi",
+    "kind": "compose",
+    "expect": "pass",
+    "notes": "FastAPI Compose example with existing Dockerfile"
+  },
+  {
+    "name": "full-stack-fastapi-template",
+    "url": "https://github.com/fastapi/full-stack-fastapi-template.git",
+    "kind": "compose",
+    "expect": "pass",
+    "notes": "Full-stack FastAPI + React + Postgres Compose template"
+  },
+  {
+    "name": "awesome-flask-single",
+    "url": "https://github.com/docker/awesome-compose.git",
+    "subdir": "flask/app",
+    "kind": "single",
+    "expect": "pass",
+    "notes": "Single-service Flask app with existing Dockerfile and requirements.txt"
+  },
+  {
+    "name": "docker-welcome",
+    "url": "https://github.com/docker/welcome-to-docker.git",
+    "kind": "single",
+    "expect": "pass",
+    "notes": "Official Docker single-service Node example with existing Dockerfile"
+  },
+  {
+    "name": "heroku-node-getting-started",
+    "url": "https://github.com/heroku/node-js-getting-started.git",
+    "kind": "single",
+    "expect": "pass",
+    "notes": "Express app without Dockerfile (tests Node backend synthesis)"
+  },
+  {
+    "name": "heroku-python-getting-started",
+    "url": "https://github.com/heroku/python-getting-started.git",
+    "kind": "single",
+    "expect": "pass",
+    "notes": "Python Django app with requirements.txt and without Dockerfile"
+  },
+  {
+    "name": "corey-fastapi-pyproject",
+    "url": "https://github.com/CoreyMSchafer/FastAPI-01-Getting-Started.git",
+    "kind": "single",
+    "expect": "pass",
+    "notes": "Python FastAPI app with pyproject.toml only and no Dockerfile or requirements.txt"
+  },
+  {
+    "name": "react-redux-realworld",
+    "url": "https://github.com/gothinkster/react-redux-realworld-example-app.git",
+    "kind": "single",
+    "expect": "pass",
+    "notes": "React SPA without Dockerfile (tests Node SPA synthesis)"
+  },
+  {
+    "name": "broken-compose",
+    "fixture": "broken-compose",
+    "kind": "compose",
+    "expect": "fail",
+    "notes": "Synthetic fixture: invalid YAML in docker-compose.yml"
+  },
+  {
+    "name": "empty-dir",
+    "fixture": "empty-dir",
+    "kind": "single",
+    "expect": "fail",
+    "notes": "Synthetic fixture: empty directory with no buildable files"
+  },
+  {
+    "name": "bad-dockerfile",
+    "fixture": "bad-dockerfile",
+    "kind": "single",
+    "expect": "fail",
+    "notes": "Synthetic fixture: Dockerfile referencing non-existent base image"
+  }
+]
