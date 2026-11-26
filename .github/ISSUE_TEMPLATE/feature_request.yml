@@ -1,0 +1,27 @@
+name: Feature Request
+description: Propose a new Skipper CLI command, stack synthesizer, runtime target, or MCP tool
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What workflow friction or missing capability are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed CLI / UX / behavior
+      description: Describe the expected command, flags, `skipper.yaml` schema, or JSON/MCP output.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds or alternative designs you considered.
+    validations:
+      required: false
