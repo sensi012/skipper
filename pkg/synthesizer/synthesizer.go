@@ -172,19 +172,60 @@ func (s *Synthesizer) generateDeployment(spec *config.AppSpec, ns string) string
 	buf.WriteString("          limits:\n")
 	buf.WriteString(fmt.Sprintf("            cpu: %s\n            memory: %s\n", cpuLim, memLim))
 
-	// Health probes
+	// Health probes: honor spec.Health when defined; otherwise fall back to TCP socket probes on TCP endpoints
+	defaultPort := 0
+	isUDP := false
 	if len(spec.Endpoints) > 0 {
-		defaultPort := spec.Endpoints[0].Port
-		buf.WriteString("        readinessProbe:\n          httpGet:\n")
-		buf.WriteString(fmt.Sprintf("            path: /healthz\n            port: %d\n", defaultPort))
-		buf.WriteString("          initialDelaySeconds: 5\n          periodSeconds: 10\n")
-
-		buf.WriteString("        livenessProbe:\n          httpGet:\n")
-		buf.WriteString(fmt.Sprintf("            path: /livez\n            port: %d\n", defaultPort))
-		buf.WriteString("          initialDelaySeconds: 10\n          periodSeconds: 15\n")
+		defaultPort = spec.Endpoints[0].Port
+		isUDP = strings.EqualFold(spec.Endpoints[0].Protocol, "UDP")
 	}
+	fallbackTCP := len(spec.Endpoints) > 0 && !isUDP
+	writeContainerProbe(&buf, "startupProbe", spec.Health.Startup, defaultPort, 0, 10, false)
+	writeContainerProbe(&buf, "readinessProbe", spec.Health.Readiness, defaultPort, 5, 10, fallbackTCP)
+	writeContainerProbe(&buf, "livenessProbe", spec.Health.Liveness, defaultPort, 10, 15, fallbackTCP)
+
+	// Writable /tmp emptyDir so readOnlyRootFilesystem: true works in production Kubernetes
+	buf.WriteString("        volumeMounts:\n")
+	buf.WriteString("        - name: tmp\n")
+	buf.WriteString("          mountPath: /tmp\n")
+	buf.WriteString("      volumes:\n")
+	buf.WriteString("      - name: tmp\n")
+	buf.WriteString("        emptyDir: {}\n")
 
 	return buf.String()
+}
+
+func writeContainerProbe(buf *bytes.Buffer, field string, probe *config.ProbeConfig, defaultPort, defaultDelay, defaultPeriod int, fallbackTCPSocket bool) {
+	if probe != nil && strings.TrimSpace(probe.Path) != "" {
+		port := probe.Port
+		if port <= 0 {
+			port = defaultPort
+		}
+		delay := probe.InitialDelaySeconds
+		if delay <= 0 {
+			delay = defaultDelay
+		}
+		period := probe.PeriodSeconds
+		if period <= 0 {
+			period = defaultPeriod
+		}
+		buf.WriteString(fmt.Sprintf("        %s:\n          httpGet:\n", field))
+		buf.WriteString(fmt.Sprintf("            path: %s\n            port: %d\n", strings.TrimSpace(probe.Path), port))
+		buf.WriteString(fmt.Sprintf("          initialDelaySeconds: %d\n          periodSeconds: %d\n", delay, period))
+		if probe.TimeoutSeconds > 0 {
+			buf.WriteString(fmt.Sprintf("          timeoutSeconds: %d\n", probe.TimeoutSeconds))
+		}
+		if probe.FailureThreshold > 0 {
+			buf.WriteString(fmt.Sprintf("          failureThreshold: %d\n", probe.FailureThreshold))
+		}
+		return
+	}
+
+	if fallbackTCPSocket && defaultPort > 0 {
+		buf.WriteString(fmt.Sprintf("        %s:\n          tcpSocket:\n", field))
+		buf.WriteString(fmt.Sprintf("            port: %d\n", defaultPort))
+		buf.WriteString(fmt.Sprintf("          initialDelaySeconds: %d\n          periodSeconds: %d\n", defaultDelay, defaultPeriod))
+	}
 }
 
 func (s *Synthesizer) generateService(spec *config.AppSpec, ns string) string {

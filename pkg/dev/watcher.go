@@ -106,7 +106,12 @@ func (d *DevServer) Start(ctx context.Context, out io.Writer) error {
 
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) {
 				if timer != nil {
-					timer.Stop()
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
 				}
 				pendingFile = filepath.Base(event.Name)
 				timer = time.NewTimer(d.opts.Debounce)

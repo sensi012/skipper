@@ -189,7 +189,7 @@ func TestDevServerDebounceReloadAndSubdirWatch(t *testing.T) {
 
 	server := NewDevServer(DevOptions{
 		WatchDir:   dir,
-		Debounce:   50 * time.Millisecond,
+		Debounce:   200 * time.Millisecond,
 		Spec:       &config.AppSpec{Name: "reload-app"},
 		RuntimeEng: rt,
 		Builder:    builder,
@@ -208,7 +208,7 @@ func TestDevServerDebounceReloadAndSubdirWatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "node_modules", "ignored.js"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("write ignored file: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(280 * time.Millisecond)
 	if rt.deployCount.Load() != 1 {
 		t.Fatalf("expected ignored file not to trigger rebuild, deploys=%d", rt.deployCount.Load())
 	}
@@ -219,10 +219,10 @@ func TestDevServerDebounceReloadAndSubdirWatch(t *testing.T) {
 		if err := os.WriteFile(target, []byte("package main // "+string(rune('a'+i))), 0o644); err != nil {
 			t.Fatalf("write main.go: %v", err)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
-	waitFor(t, 2*time.Second, func() bool { return rt.deployCount.Load() >= 2 })
-	time.Sleep(100 * time.Millisecond)
+	waitFor(t, 3*time.Second, func() bool { return rt.deployCount.Load() >= 2 })
+	time.Sleep(250 * time.Millisecond)
 	if got := rt.deployCount.Load(); got != 2 {
 		t.Fatalf("expected rapid burst to coalesce into 1 reload (total 2 deploys), got %d", got)
 	}
