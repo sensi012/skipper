@@ -1,12 +1,12 @@
 {
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Intent-first developer platform CLI for Docker and Kubernetes",
   "homepage": "https://github.com/sensi012/skipper",
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/sensi012/skipper/releases/download/v0.1.0/skipper-windows-amd64.exe#/skipper.exe",
-      "hash": "REPLACE_WITH_WINDOWS_AMD64_SHA256"
+      "url": "https://github.com/sensi012/skipper/releases/download/v0.1.1/skipper-windows-amd64.exe#/skipper.exe",
+      "hash": "b32bc0d71932d828399d46456548e2afad05684543a8962d1734194e2a0dec2c"
     }
   },
   "bin": "skipper.exe",
