@@ -45,10 +45,10 @@ func (d *DockerAdapter) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// normalizeDockerMemory converts Kubernetes memory quantities into Docker CLI-compatible
-// memory strings. Binary units (Ki/Mi/Gi/Ti) map 1:1 to Docker's k/m/g. Decimal units
-// (K/M/G) are rounded to the nearest binary k/m so local limits mirror production without
-// unreadable multi-digit byte strings (e.g. 500M -> 477m, 1G -> 954m).
+// normalizeDockerMemory converts Kubernetes and human memory quantities into Docker CLI-compatible
+// memory strings. Binary units (Ki/Mi/Gi/Ti, KiB/MiB/GiB/TiB) and Compose mb/gb/kb units map to
+// Docker's k/m/g. Decimal units (K/M/G/T) are rounded to the nearest binary unit so local limits
+// mirror production without unreadable multi-digit byte strings (e.g. 500M -> 477m, 1G -> 954m).
 func normalizeDockerMemory(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -93,6 +93,48 @@ func normalizeDockerMemory(raw string) string {
 			return fmt.Sprintf("%dm", mib)
 		}
 		return strings.TrimSuffix(s, "G") + "g"
+	case strings.HasSuffix(s, "T"):
+		if n, err := strconv.ParseFloat(strings.TrimSuffix(s, "T"), 64); err == nil && n > 0 {
+			gib := int64(math.Round(n * 1e12 / (1024.0 * 1024.0 * 1024.0)))
+			if gib < 1 {
+				gib = 1
+			}
+			return fmt.Sprintf("%dg", gib)
+		}
+		return strings.TrimSuffix(s, "T") + "g"
+	}
+
+	lower := strings.ToLower(s)
+	switch {
+	case strings.HasSuffix(lower, "kib"):
+		return s[:len(s)-3] + "k"
+	case strings.HasSuffix(lower, "mib"):
+		return s[:len(s)-3] + "m"
+	case strings.HasSuffix(lower, "gib"):
+		return s[:len(s)-3] + "g"
+	case strings.HasSuffix(lower, "tib"):
+		if n, err := strconv.ParseFloat(s[:len(s)-3], 64); err == nil {
+			return strconv.FormatFloat(n*1024, 'f', -1, 64) + "g"
+		}
+		return s[:len(s)-3] + "g"
+	case strings.HasSuffix(lower, "kb"):
+		return s[:len(s)-2] + "k"
+	case strings.HasSuffix(lower, "mb"):
+		return s[:len(s)-2] + "m"
+	case strings.HasSuffix(lower, "gb"):
+		return s[:len(s)-2] + "g"
+	case strings.HasSuffix(lower, "tb"):
+		if n, err := strconv.ParseFloat(s[:len(s)-2], 64); err == nil {
+			return strconv.FormatFloat(n*1024, 'f', -1, 64) + "g"
+		}
+		return s[:len(s)-2] + "g"
+	case strings.HasSuffix(lower, "t"):
+		if n, err := strconv.ParseFloat(s[:len(s)-1], 64); err == nil {
+			return strconv.FormatFloat(n*1024, 'f', -1, 64) + "g"
+		}
+		return s[:len(s)-1] + "g"
+	case strings.HasSuffix(lower, "b"):
+		return s[:len(s)-1]
 	default:
 		return s
 	}
@@ -191,6 +233,115 @@ func buildDockerRunArgsWithDeps(spec *config.AppSpec, networkName string, extraE
 	}
 	args = append(args, targetImage)
 	return args
+}
+
+// DockerDeployPlan describes the containers, network, and Docker commands
+// that DockerAdapter.Deploy will create or replace.
+type DockerDeployPlan struct {
+	Workload   string     `json:"workload"`
+	Image      string     `json:"image"`
+	Network    string     `json:"network,omitempty"`
+	Containers []string   `json:"containers"`
+	Commands   [][]string `json:"commands"`
+}
+
+// BuildDockerDeployPlan resolves dependencies and constructs a dry-run execution plan
+// for launching spec with DockerAdapter without contacting the Docker daemon.
+func BuildDockerDeployPlan(spec *config.AppSpec) (*DockerDeployPlan, error) {
+	if spec == nil || strings.TrimSpace(spec.Name) == "" {
+		return nil, fmt.Errorf("app spec with a non-empty name is required")
+	}
+	if err := validateSafeArg("workload name", spec.Name); err != nil {
+		return nil, err
+	}
+	if err := validateOptionalSafeArg("image", spec.Image); err != nil {
+		return nil, err
+	}
+
+	targetImage := spec.Image
+	if targetImage == "" {
+		targetImage = fmt.Sprintf("%s:latest", spec.Name)
+	}
+
+	plan := &DockerDeployPlan{
+		Workload: spec.Name,
+		Image:    targetImage,
+	}
+
+	var networkName string
+	var extraEnv []config.EnvVar
+	if len(spec.Dependencies.Services) > 0 {
+		resolved := make([]resolvedDependency, 0, len(spec.Dependencies.Services))
+		for _, dep := range spec.Dependencies.Services {
+			if strings.TrimSpace(dep.Name) == "" {
+				return nil, fmt.Errorf("service dependency name must not be empty")
+			}
+			img, port, env, err := ResolveDependencyPreset(spec.Name, dep)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve dependency %s: %w", dep.Name, err)
+			}
+			resolved = append(resolved, resolvedDependency{
+				name:  dep.Name,
+				image: img,
+				port:  port,
+				env:   env,
+			})
+		}
+
+		networkName = DockerNetworkName(spec.Name)
+		plan.Network = networkName
+		plan.Commands = append(plan.Commands, []string{"docker", "network", "create", networkName})
+
+		for i, dep := range spec.Dependencies.Services {
+			depContainer := fmt.Sprintf("%s-%s", spec.Name, dep.Name)
+			plan.Containers = append(plan.Containers, depContainer)
+			plan.Commands = append(plan.Commands, []string{"docker", "rm", "-f", depContainer})
+			depArgs := buildDependencyRunArgs(spec.Name, networkName, dep, resolved[i].image, resolved[i].env)
+			plan.Commands = append(plan.Commands, append([]string{"docker"}, depArgs...))
+		}
+		extraEnv = buildDependencyEnvVars(resolved)
+	}
+
+	plan.Containers = append(plan.Containers, spec.Name)
+	plan.Commands = append(plan.Commands, []string{"docker", "rm", "-f", spec.Name})
+	runArgs := buildDockerRunArgsWithDeps(spec, networkName, extraEnv)
+	plan.Commands = append(plan.Commands, append([]string{"docker"}, runArgs...))
+	return plan, nil
+}
+
+// BuildDockerStopPlan returns the containers, network, and Docker commands
+// that DockerAdapter.Stop will stop and remove without mutating any resources.
+func BuildDockerStopPlan(workloadName string, spec *config.AppSpec) ([]string, string, [][]string, error) {
+	workload := strings.TrimSpace(workloadName)
+	if err := validateSafeArg("workload name", workload); err != nil {
+		return nil, "", nil, err
+	}
+
+	containers := []string{workload}
+	var depContainers []string
+	if spec != nil && strings.TrimSpace(spec.Name) == workload {
+		for _, dep := range spec.Dependencies.Services {
+			depName := strings.TrimSpace(dep.Name)
+			if depName == "" {
+				continue
+			}
+			c := fmt.Sprintf("%s-%s", workload, depName)
+			containers = append(containers, c)
+			depContainers = append(depContainers, c)
+		}
+	}
+
+	network := DockerNetworkName(workload)
+	commands := [][]string{
+		{"docker", "stop", workload},
+		{"docker", "rm", "-f", workload},
+	}
+	if len(depContainers) > 0 {
+		commands = append(commands, append([]string{"docker", "rm", "-f"}, depContainers...))
+	}
+	commands = append(commands, []string{"docker", "network", "rm", network})
+
+	return containers, network, commands, nil
 }
 
 func (d *DockerAdapter) Deploy(ctx context.Context, spec *config.AppSpec) (*WorkloadStatus, error) {

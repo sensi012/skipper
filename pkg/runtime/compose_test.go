@@ -206,3 +206,30 @@ func TestComposeRunnerSecurityValidationAndConstructors(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildComposeArgsHelpers(t *testing.T) {
+	upArgs, err := BuildComposeUpArgs(ComposeUpOptions{
+		File:     "docker-compose.yml",
+		Services: []string{"db", "web"},
+		Build:    true,
+		Detach:   true,
+	})
+	if err != nil {
+		t.Fatalf("BuildComposeUpArgs failed: %v", err)
+	}
+	if !reflect.DeepEqual(upArgs, []string{"compose", "-f", "docker-compose.yml", "up", "-d", "--build", "db", "web"}) {
+		t.Fatalf("unexpected upArgs: %v", upArgs)
+	}
+
+	downArgs, err := BuildComposeDownArgs(ComposeDownOptions{
+		File:          "docker-compose.yml",
+		RemoveVolumes: true,
+		RemoveOrphans: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildComposeDownArgs failed: %v", err)
+	}
+	if !reflect.DeepEqual(downArgs, []string{"compose", "-f", "docker-compose.yml", "down", "-v", "--remove-orphans"}) {
+		t.Fatalf("unexpected downArgs: %v", downArgs)
+	}
+}

@@ -126,3 +126,31 @@ func TestSynthesizeEdgeCasesAndValidation(t *testing.T) {
 		t.Errorf("expected fallback default CPU 100m on zero-value Synthesizer, err=%v", err)
 	}
 }
+
+func TestSynthesizeNormalizesDockerMemoryAndCPUUnits(t *testing.T) {
+	synth := NewSynthesizer()
+	spec := &config.AppSpec{
+		Name: "normalized-app",
+		Runtime: config.RuntimeConfig{
+			Resources: config.ResourceConfig{
+				CPU:    config.ResourceLimit{Request: "0.25", Limit: "1.5"},
+				Memory: config.ResourceLimit{Request: "256m", Limit: "1gb"},
+			},
+		},
+	}
+
+	bundle, err := synth.Synthesize(spec, "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"cpu: 250m",
+		"memory: 256Mi",
+		"cpu: 1500m",
+		"memory: 1Gi",
+	} {
+		if !strings.Contains(bundle.Deployment, want) {
+			t.Errorf("expected %q in synthesized deployment:\n%s", want, bundle.Deployment)
+		}
+	}
+}

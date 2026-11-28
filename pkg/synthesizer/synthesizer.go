@@ -105,14 +105,14 @@ func (s *Synthesizer) generateDeployment(spec *config.AppSpec, ns string) string
 		cpuReq = "100m"
 	}
 	if spec.Runtime.Resources.CPU.Request != "" {
-		cpuReq = spec.Runtime.Resources.CPU.Request
+		cpuReq = config.NormalizeKubernetesCPU(spec.Runtime.Resources.CPU.Request)
 	}
 	cpuLim := s.DefaultCPULimit
 	if cpuLim == "" {
 		cpuLim = "500m"
 	}
 	if spec.Runtime.Resources.CPU.Limit != "" {
-		cpuLim = spec.Runtime.Resources.CPU.Limit
+		cpuLim = config.NormalizeKubernetesCPU(spec.Runtime.Resources.CPU.Limit)
 	}
 
 	memReq := s.DefaultMemoryRequest
@@ -120,14 +120,14 @@ func (s *Synthesizer) generateDeployment(spec *config.AppSpec, ns string) string
 		memReq = "128Mi"
 	}
 	if spec.Runtime.Resources.Memory.Request != "" {
-		memReq = spec.Runtime.Resources.Memory.Request
+		memReq = config.NormalizeKubernetesMemory(spec.Runtime.Resources.Memory.Request)
 	}
 	memLim := s.DefaultMemoryLimit
 	if memLim == "" {
 		memLim = "512Mi"
 	}
 	if spec.Runtime.Resources.Memory.Limit != "" {
-		memLim = spec.Runtime.Resources.Memory.Limit
+		memLim = config.NormalizeKubernetesMemory(spec.Runtime.Resources.Memory.Limit)
 	}
 
 	var buf bytes.Buffer

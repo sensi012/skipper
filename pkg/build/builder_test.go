@@ -669,3 +669,34 @@ dependencies = ["fastapi>=0.110", "uvicorn>=0.27"]
 		}
 	})
 }
+
+func TestCNBBuilderPlanDryRun(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/plan\n\ngo 1.25\n"), 0644)
+
+	execCount := 0
+	b := NewCNBBuilderWithRunner(func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+		if name == "pack" && len(args) > 0 && args[0] == "version" {
+			return errors.New("no pack")
+		}
+		execCount++
+		return errors.New("unexpected build invocation")
+	})
+
+	plan, err := b.Plan(context.Background(), &config.AppSpec{
+		Name:  "planner",
+		Build: config.BuildConfig{Context: dir},
+	})
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if execCount != 0 {
+		t.Fatalf("expected zero docker build calls during Plan, got %d", execCount)
+	}
+	if plan.Strategy != "synthesized-dockerfile" || plan.Runtime != RuntimeGo || plan.Image != "planner:latest" {
+		t.Fatalf("unexpected plan: %+v", plan)
+	}
+	if !strings.Contains(plan.SynthesizedDockerfile, "FROM golang:1.25-alpine") {
+		t.Errorf("expected synthesized Go Dockerfile in plan, got:\n%s", plan.SynthesizedDockerfile)
+	}
+}

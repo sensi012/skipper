@@ -9,6 +9,11 @@ import (
 	"unicode"
 )
 
+// ValidateClusterName validates a Kind cluster name against CLI safety constraints.
+func ValidateClusterName(name string) error {
+	return validateClusterName(name)
+}
+
 func validateClusterName(name string) error {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -79,6 +84,11 @@ func (k *KindManager) Exists(ctx context.Context, clusterName string) (bool, err
 		}
 	}
 	return false, nil
+}
+
+// KindConfigYAML returns the Kind cluster YAML used when provisioning a local ingress-ready cluster.
+func KindConfigYAML() string {
+	return buildKindConfig()
 }
 
 func buildKindConfig() string {

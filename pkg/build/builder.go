@@ -222,16 +222,24 @@ func resolveSafeDockerfilePath(sourceDir, dockerfile string) (string, error) {
 	return filepath.Join(sourceDir, df), nil
 }
 
-// Build compiles source code into an OCI image
-func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Writer) (string, error) {
+// BuildPlan describes the resolved build strategy, command, and optional synthesized Dockerfile
+// for a single target without executing the build.
+type BuildPlan struct {
+	Service               string          `json:"service"`
+	Image                 string          `json:"image"`
+	Context               string          `json:"context"`
+	Runtime               LanguageRuntime `json:"runtime"`
+	Strategy              string          `json:"strategy"`
+	Command               []string        `json:"command"`
+	SynthesizedDockerfile string          `json:"synthesizedDockerfile,omitempty"`
+}
+
+func (b *CNBBuilder) resolveBuildPlan(ctx context.Context, spec *config.AppSpec, verbose bool, out io.Writer) (*BuildPlan, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return nil, err
 	}
 	if spec == nil {
-		return "", fmt.Errorf("app spec must not be nil")
-	}
-	if out == nil {
-		out = io.Discard
+		return nil, fmt.Errorf("app spec must not be nil")
 	}
 
 	sourceDir := strings.TrimSpace(spec.Build.Context)
@@ -241,34 +249,34 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 		var err error
 		sourceDir, err = validateBuildArg(sourceDir, "build context", false)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 
 	if strings.TrimSpace(spec.Build.Target) != "" {
 		if _, err := validateBuildArg(spec.Build.Target, "build target", true); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 	if err := validateBuildArgsMap(spec.Build.Args); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	detection, err := b.Detect(ctx, sourceDir)
 	if err != nil {
-		return "", fmt.Errorf("language detection failed: %w", err)
+		return nil, fmt.Errorf("language detection failed: %w", err)
 	}
 
 	targetTag := strings.TrimSpace(spec.Image)
 	if targetTag == "" {
 		if strings.TrimSpace(spec.Name) == "" {
-			return "", fmt.Errorf("either spec.Image or spec.Name must be specified")
+			return nil, fmt.Errorf("either spec.Image or spec.Name must be specified")
 		}
 		targetTag = fmt.Sprintf("%s:latest", strings.TrimSpace(spec.Name))
 	}
 	targetTag, err = validateBuildArg(targetTag, "target image tag", true)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	if detection.Runtime == RuntimeUnknown && strings.TrimSpace(spec.Build.Dockerfile) == "" {
@@ -282,34 +290,37 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 			for _, svc := range subServices {
 				parts = append(parts, fmt.Sprintf("%s (%s)", svc.Name, svc.Runtime))
 			}
-			return "", fmt.Errorf("%s; found subfolder services: %s — run 'skipper build --discover', or run from the repo root with a compose file", baseMsg, strings.Join(parts, ", "))
+			return nil, fmt.Errorf("%s; found subfolder services: %s — run 'skipper build --discover', or run from the repo root with a compose file", baseMsg, strings.Join(parts, ", "))
 		}
-		return "", fmt.Errorf("%s", baseMsg)
+		return nil, fmt.Errorf("%s", baseMsg)
 	}
 
-	_, _ = fmt.Fprintf(out, "==> Auto-detected stack: [%s] (Files: %s)\n", detection.Runtime, strings.Join(detection.FilesFound, ", "))
+	if verbose && out != nil {
+		_, _ = fmt.Fprintf(out, "==> Auto-detected stack: [%s] (Files: %s)\n", detection.Runtime, strings.Join(detection.FilesFound, ", "))
+	}
 
 	// Check if pack CLI is available
 	hasPack := b.execCmd(ctx, nil, nil, nil, "pack", "version") == nil
 
 	if hasPack && detection.Runtime != RuntimeDockerfile && strings.TrimSpace(spec.Build.Dockerfile) == "" {
-		// Use native Cloud Native Buildpacks via pack CLI
 		builder := strings.TrimSpace(spec.Build.Builder)
 		if builder == "" {
 			builder = detection.Builder
 		}
 		builder, err = validateBuildArg(builder, "CNB builder", true)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		_, _ = fmt.Fprintf(out, "==> Building OCI image with Cloud Native Buildpacks (Builder: %s)...\n", builder)
-		if err := b.execCmd(ctx, nil, out, out, "pack", "build", targetTag, "--path", sourceDir, "--builder", builder); err != nil {
-			return "", fmt.Errorf("pack build failed: %w", err)
-		}
-		return targetTag, nil
+		return &BuildPlan{
+			Service:  spec.Name,
+			Image:    targetTag,
+			Context:  sourceDir,
+			Runtime:  detection.Runtime,
+			Strategy: "pack",
+			Command:  []string{"pack", "build", targetTag, "--path", sourceDir, "--builder", builder},
+		}, nil
 	}
 
-	// Fallback path: If Dockerfile exists or explicit Dockerfile is configured, use Docker BuildKit
 	if detection.Runtime == RuntimeDockerfile || strings.TrimSpace(spec.Build.Dockerfile) != "" {
 		dockerfile := "Dockerfile"
 		if strings.TrimSpace(spec.Build.Dockerfile) != "" {
@@ -317,39 +328,81 @@ func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Wri
 		}
 		dfPath, err := resolveSafeDockerfilePath(sourceDir, dockerfile)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		_, _ = fmt.Fprintf(out, "==> Building OCI image via Docker BuildKit with %s...\n", dockerfile)
-		buildArgs := []string{"build", "-t", targetTag, "-f", dfPath}
+		buildArgs := []string{"docker", "build", "-t", targetTag, "-f", dfPath}
 		if strings.TrimSpace(spec.Build.Target) != "" {
 			buildArgs = append(buildArgs, "--target", strings.TrimSpace(spec.Build.Target))
 		}
 		buildArgs = appendBuildArgFlags(buildArgs, spec.Build.Args)
 		buildArgs = append(buildArgs, sourceDir)
-		if err := b.execCmd(ctx, nil, out, out, "docker", buildArgs...); err != nil {
-			return "", fmt.Errorf("docker build failed: %w", err)
-		}
-		return targetTag, nil
+		return &BuildPlan{
+			Service:  spec.Name,
+			Image:    targetTag,
+			Context:  sourceDir,
+			Runtime:  detection.Runtime,
+			Strategy: "dockerfile",
+			Command:  buildArgs,
+		}, nil
 	}
 
-	// Synthesize automated multi-stage Dockerfile if pack is absent for zero-setup ergonomics
-	_, _ = fmt.Fprintf(out, "==> Synthesizing optimal multi-stage container build for [%s]...\n", detection.Runtime)
 	synthDockerfile, err := b.synthesizeDockerfileForDir(detection, sourceDir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	buildArgs := []string{"build", "-t", targetTag, "-f", "-"}
+	buildArgs := []string{"docker", "build", "-t", targetTag, "-f", "-"}
 	if strings.TrimSpace(spec.Build.Target) != "" {
 		buildArgs = append(buildArgs, "--target", strings.TrimSpace(spec.Build.Target))
 	}
 	buildArgs = appendBuildArgFlags(buildArgs, spec.Build.Args)
 	buildArgs = append(buildArgs, sourceDir)
-	if err := b.execCmd(ctx, strings.NewReader(synthDockerfile), out, out, "docker", buildArgs...); err != nil {
-		return "", fmt.Errorf("synthesized container build failed: %w", err)
+	return &BuildPlan{
+		Service:               spec.Name,
+		Image:                 targetTag,
+		Context:               sourceDir,
+		Runtime:               detection.Runtime,
+		Strategy:              "synthesized-dockerfile",
+		Command:               buildArgs,
+		SynthesizedDockerfile: synthDockerfile,
+	}, nil
+}
+
+// Plan inspects the build context and resolves the build strategy, command, and any synthesized Dockerfile without executing a build.
+func (b *CNBBuilder) Plan(ctx context.Context, spec *config.AppSpec) (*BuildPlan, error) {
+	return b.resolveBuildPlan(ctx, spec, false, nil)
+}
+
+// Build compiles source code into an OCI image
+func (b *CNBBuilder) Build(ctx context.Context, spec *config.AppSpec, out io.Writer) (string, error) {
+	if out == nil {
+		out = io.Discard
 	}
 
-	return targetTag, nil
+	plan, err := b.resolveBuildPlan(ctx, spec, true, out)
+	if err != nil {
+		return "", err
+	}
+
+	switch plan.Strategy {
+	case "pack":
+		builder := plan.Command[len(plan.Command)-1]
+		_, _ = fmt.Fprintf(out, "==> Building OCI image with Cloud Native Buildpacks (Builder: %s)...\n", builder)
+		if err := b.execCmd(ctx, nil, out, out, plan.Command[0], plan.Command[1:]...); err != nil {
+			return "", fmt.Errorf("pack build failed: %w", err)
+		}
+	case "dockerfile":
+		_, _ = fmt.Fprintf(out, "==> Building OCI image via Docker BuildKit with %s...\n", plan.Command[5])
+		if err := b.execCmd(ctx, nil, out, out, plan.Command[0], plan.Command[1:]...); err != nil {
+			return "", fmt.Errorf("docker build failed: %w", err)
+		}
+	default:
+		_, _ = fmt.Fprintf(out, "==> Synthesizing optimal multi-stage container build for [%s]...\n", plan.Runtime)
+		if err := b.execCmd(ctx, strings.NewReader(plan.SynthesizedDockerfile), out, out, plan.Command[0], plan.Command[1:]...); err != nil {
+			return "", fmt.Errorf("synthesized container build failed: %w", err)
+		}
+	}
+
+	return plan.Image, nil
 }
 
 func appendBuildArgFlags(args []string, buildArgs map[string]string) []string {

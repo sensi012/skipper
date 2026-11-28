@@ -11,12 +11,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ComposeResourcePlan represents a named Compose volume or network resolved for lifecycle reporting.
+type ComposeResourcePlan struct {
+	Key      string `json:"key"`
+	Name     string `json:"name"`
+	External bool   `json:"external,omitempty"`
+}
+
 // ComposeProject represents a full multi-service Docker Compose workspace.
 type ComposeProject struct {
 	Name     string
 	Dir      string
 	File     string
 	Services []ProjectService
+	Volumes  []ComposeResourcePlan
+	Networks []ComposeResourcePlan
 }
 
 // ProjectService represents an individual service loaded from a Compose file.
@@ -149,13 +158,87 @@ func LoadComposeProject(path string) (*ComposeProject, error) {
 	}
 
 	ordered := sortServices(svcMap)
+	volumes := parseComposeResourcePlans(compose.Volumes, projectName, lookup)
+	networks := parseComposeResourcePlans(compose.Networks, projectName, lookup)
+	if len(networks) == 0 {
+		networks = []ComposeResourcePlan{{
+			Key:  "default",
+			Name: fmt.Sprintf("%s_default", projectName),
+		}}
+	}
 
 	return &ComposeProject{
 		Name:     projectName,
 		Dir:      projectDir,
 		File:     path,
 		Services: ordered,
+		Volumes:  volumes,
+		Networks: networks,
 	}, nil
+}
+
+func parseComposeResourcePlans(raw map[string]interface{}, projectName string, lookup func(string) (string, bool)) []ComposeResourcePlan {
+	if len(raw) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	plans := make([]ComposeResourcePlan, 0, len(keys))
+	for _, key := range keys {
+		entry := raw[key]
+		plan := ComposeResourcePlan{
+			Key:  key,
+			Name: fmt.Sprintf("%s_%s", projectName, key),
+		}
+
+		var fields map[string]interface{}
+		switch m := entry.(type) {
+		case map[string]interface{}:
+			fields = m
+		case map[interface{}]interface{}:
+			fields = make(map[string]interface{}, len(m))
+			for mk, mv := range m {
+				fields[fmt.Sprintf("%v", mk)] = mv
+			}
+		}
+
+		var extName string
+		if fields != nil {
+			switch ext := fields["external"].(type) {
+			case bool:
+				plan.External = ext
+			case map[string]interface{}:
+				plan.External = true
+				if n, ok := ext["name"].(string); ok {
+					extName = strings.TrimSpace(interpolateVars(n, lookup))
+				}
+			case map[interface{}]interface{}:
+				plan.External = true
+				if n, ok := ext["name"].(string); ok {
+					extName = strings.TrimSpace(interpolateVars(n, lookup))
+				}
+			}
+
+			if n, ok := fields["name"].(string); ok {
+				if resolved := strings.TrimSpace(interpolateVars(n, lookup)); resolved != "" {
+					plan.Name = resolved
+				}
+			} else if plan.External {
+				if extName != "" {
+					plan.Name = extName
+				} else {
+					plan.Name = key
+				}
+			}
+		}
+
+		plans = append(plans, plan)
+	}
+	return plans
 }
 
 // SanitizeName normalizes a project or service name to lowercase [a-z0-9_-],

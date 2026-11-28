@@ -96,13 +96,30 @@ func validateComposeServices(services []string) ([]string, error) {
 	return cleaned, nil
 }
 
-// Up launches services defined in the Compose file via `docker compose -f <file> up`.
-func (r *ComposeRunner) Up(ctx context.Context, opts ComposeUpOptions, out, errOut io.Writer) error {
+// BuildComposeUpArgs validates options and constructs the `docker compose up` argument list.
+func BuildComposeUpArgs(opts ComposeUpOptions) ([]string, error) {
 	file, err := validateComposeFile(opts.File)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	services, err := validateComposeServices(opts.Services)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"compose", "-f", file, "up"}
+	if opts.Detach {
+		args = append(args, "-d")
+	}
+	if opts.Build {
+		args = append(args, "--build")
+	}
+	args = append(args, services...)
+	return args, nil
+}
+
+// Up launches services defined in the Compose file via `docker compose -f <file> up`.
+func (r *ComposeRunner) Up(ctx context.Context, opts ComposeUpOptions, out, errOut io.Writer) error {
+	args, err := BuildComposeUpArgs(opts)
 	if err != nil {
 		return err
 	}
@@ -112,15 +129,6 @@ func (r *ComposeRunner) Up(ctx context.Context, opts ComposeUpOptions, out, errO
 	if errOut == nil {
 		errOut = io.Discard
 	}
-
-	args := []string{"compose", "-f", file, "up"}
-	if opts.Detach {
-		args = append(args, "-d")
-	}
-	if opts.Build {
-		args = append(args, "--build")
-	}
-	args = append(args, services...)
 
 	cmd := r.command(ctx, "docker", args...)
 	cmd.Stdout = out
@@ -131,9 +139,25 @@ func (r *ComposeRunner) Up(ctx context.Context, opts ComposeUpOptions, out, errO
 	return nil
 }
 
+// BuildComposeDownArgs validates options and constructs the `docker compose down` argument list.
+func BuildComposeDownArgs(opts ComposeDownOptions) ([]string, error) {
+	file, err := validateComposeFile(opts.File)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"compose", "-f", file, "down"}
+	if opts.RemoveVolumes {
+		args = append(args, "-v")
+	}
+	if opts.RemoveOrphans {
+		args = append(args, "--remove-orphans")
+	}
+	return args, nil
+}
+
 // Down stops and removes Compose resources via `docker compose -f <file> down`.
 func (r *ComposeRunner) Down(ctx context.Context, opts ComposeDownOptions, out, errOut io.Writer) error {
-	file, err := validateComposeFile(opts.File)
+	args, err := BuildComposeDownArgs(opts)
 	if err != nil {
 		return err
 	}
@@ -142,14 +166,6 @@ func (r *ComposeRunner) Down(ctx context.Context, opts ComposeDownOptions, out, 
 	}
 	if errOut == nil {
 		errOut = io.Discard
-	}
-
-	args := []string{"compose", "-f", file, "down"}
-	if opts.RemoveVolumes {
-		args = append(args, "-v")
-	}
-	if opts.RemoveOrphans {
-		args = append(args, "--remove-orphans")
 	}
 
 	cmd := r.command(ctx, "docker", args...)

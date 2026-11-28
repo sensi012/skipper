@@ -111,17 +111,30 @@ func TestBuildDockerRunArgs(t *testing.T) {
 
 func TestNormalizeDockerUnits(t *testing.T) {
 	memCases := map[string]string{
-		"512Mi":   "512m",
-		"1Gi":     "1g",
-		"256Ki":   "256k",
-		"2Ti":     "2048g",
-		"500M":    "477m",
-		"1G":      "954m",
-		"2G":      "1907m",
-		"1024K":   "1000k",
-		"512m":    "512m",
-		"1048576": "1048576",
-		"":        "",
+		"512Mi":    "512m",
+		"1Gi":      "1g",
+		"256Ki":    "256k",
+		"2Ti":      "2048g",
+		"512MiB":   "512m",
+		"1GiB":     "1g",
+		"256KiB":   "256k",
+		"2TiB":     "2048g",
+		"512mb":    "512m",
+		"512MB":    "512m",
+		"1gb":      "1g",
+		"1GB":      "1g",
+		"256kb":    "256k",
+		"2t":       "2048g",
+		"2tb":      "2048g",
+		"500M":     "477m",
+		"1G":       "954m",
+		"2G":       "1907m",
+		"1T":       "931g",
+		"1024K":    "1000k",
+		"512m":     "512m",
+		"1048576b": "1048576",
+		"1048576":  "1048576",
+		"":         "",
 	}
 	for in, want := range memCases {
 		if got := normalizeDockerMemory(in); got != want {
@@ -697,6 +710,54 @@ func TestRuntimeFlagInjectionAndInputValidation(t *testing.T) {
 		badNS := NewKubernetesAdapter(bad)
 		if _, err := badNS.Deploy(ctx, &config.AppSpec{Name: "app"}); err == nil {
 			t.Errorf("KubernetesAdapter.Deploy should reject namespace %q", bad)
+		}
+	}
+}
+
+func TestBuildDockerPlansAndK8sUnitNormalization(t *testing.T) {
+	spec := &config.AppSpec{
+		Name:  "orders-api",
+		Image: "orders-api:v1",
+		Dependencies: config.DependenciesConfig{
+			Services: []config.ServiceDependency{
+				{Name: "db", Type: "postgres"},
+			},
+		},
+		Runtime: config.RuntimeConfig{
+			Resources: config.ResourceConfig{
+				CPU:    config.ResourceLimit{Request: "0.25", Limit: "1.5"},
+				Memory: config.ResourceLimit{Request: "256m", Limit: "1gb"},
+			},
+		},
+	}
+
+	deployPlan, err := BuildDockerDeployPlan(spec)
+	if err != nil {
+		t.Fatalf("BuildDockerDeployPlan failed: %v", err)
+	}
+	if deployPlan.Network != "skipper-orders-api-net" || len(deployPlan.Containers) != 2 {
+		t.Fatalf("unexpected deployPlan: %+v", deployPlan)
+	}
+	if deployPlan.Containers[0] != "orders-api-db" || deployPlan.Containers[1] != "orders-api" {
+		t.Fatalf("unexpected containers order: %v", deployPlan.Containers)
+	}
+
+	stopContainers, stopNet, stopCmds, err := BuildDockerStopPlan("orders-api", spec)
+	if err != nil {
+		t.Fatalf("BuildDockerStopPlan failed: %v", err)
+	}
+	if len(stopContainers) != 2 || stopNet != "skipper-orders-api-net" || len(stopCmds) != 4 {
+		t.Fatalf("unexpected stop plan: containers=%v net=%q cmds=%v", stopContainers, stopNet, stopCmds)
+	}
+
+	k := NewKubernetesAdapter("prod")
+	yamlOut, err := k.GenerateStandardManifests(spec)
+	if err != nil {
+		t.Fatalf("GenerateStandardManifests failed: %v", err)
+	}
+	for _, want := range []string{"cpu: 250m", "memory: 256Mi", "cpu: 1500m", "memory: 1Gi"} {
+		if !strings.Contains(yamlOut, want) {
+			t.Errorf("expected %q in generated K8s manifest:\n%s", want, yamlOut)
 		}
 	}
 }

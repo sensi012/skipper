@@ -22,6 +22,7 @@ import (
 	"github.com/sensi012/skipper/pkg/diagnostics"
 	"github.com/sensi012/skipper/pkg/doctor"
 	"github.com/sensi012/skipper/pkg/governance"
+	"github.com/sensi012/skipper/pkg/local"
 	"github.com/sensi012/skipper/pkg/opmem"
 	"github.com/sensi012/skipper/pkg/runtime"
 )
@@ -2108,6 +2109,238 @@ func TestComposeLifecycleCmds(t *testing.T) {
 		out, _, err = executeCLI(t, "down", "explicit-svc")
 		if err != nil || !strings.Contains(out, "Workload 'explicit-svc' stopped") {
 			t.Fatalf("expected single-service down when positional arg given, got err=%v out=%s", err, out)
+		}
+	})
+}
+
+func TestDryRunPlansAcrossLifecycleCommands(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+
+	t.Run("compose down --dry-run and -v --dry-run inspect volumes without executing", func(t *testing.T) {
+		resetGlobals(t)
+		dir := chdirTemp(t)
+		composeYAML := `name: billing
+services:
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - db_data:/var/lib/postgresql/data
+  api:
+    image: acme/api:1.0
+volumes:
+  db_data:
+  ext_cache:
+    external: true
+networks:
+  backend:
+`
+		if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(composeYAML), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var calls [][]string
+		withFakeComposeRunner(t, func(name string, args []string) composeExecStub {
+			return composeExecStub{exitCode: 0}
+		}, &calls)
+
+		// Without -v: named volumes preserved
+		out, _, err := executeCLI(t, "down", "--dry-run")
+		if err != nil {
+			t.Fatalf("down --dry-run failed: %v\n%s", err, out)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("expected 0 compose exec calls in --dry-run, got %v", calls)
+		}
+		for _, want := range []string{"[DRY RUN]", "billing_db_data", "Volumes preserved:", "billing_backend", "No resources were stopped or deleted (--dry-run)."} {
+			if !strings.Contains(out, want) {
+				t.Errorf("down --dry-run text missing %q:\n%s", want, out)
+			}
+		}
+
+		// With -v --format json: db_data under volumesToDelete, ext_cache preserved
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "down", "-v", "--dry-run", "--format", "json")
+		if err != nil {
+			t.Fatalf("down -v --dry-run --format json failed: %v\n%s", err, out)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("expected 0 compose exec calls, got %v", calls)
+		}
+		var downPlan struct {
+			DryRun           bool     `json:"dryRun"`
+			Status           string   `json:"status"`
+			VolumesRemoved   bool     `json:"volumesRemoved"`
+			ServicesToStop   []string `json:"servicesToStop"`
+			NetworksToRemove []string `json:"networksToRemove"`
+			VolumesToDelete  []string `json:"volumesToDelete"`
+			VolumesPreserved []string `json:"volumesPreserved"`
+			Command          []string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(out), &downPlan); err != nil {
+			t.Fatalf("invalid JSON from down -v --dry-run: %v\n%s", err, out)
+		}
+		if !downPlan.DryRun || downPlan.Status != "DRY_RUN" || !downPlan.VolumesRemoved {
+			t.Fatalf("unexpected downPlan header: %+v", downPlan)
+		}
+		if len(downPlan.VolumesToDelete) != 1 || downPlan.VolumesToDelete[0] != "billing_db_data" {
+			t.Errorf("expected volumesToDelete=[billing_db_data], got %v", downPlan.VolumesToDelete)
+		}
+		if len(downPlan.VolumesPreserved) != 1 || downPlan.VolumesPreserved[0] != "ext_cache" {
+			t.Errorf("expected external volume preserved, got %v", downPlan.VolumesPreserved)
+		}
+		if len(downPlan.ServicesToStop) != 2 || len(downPlan.NetworksToRemove) != 1 {
+			t.Errorf("unexpected services/networks in downPlan: %+v", downPlan)
+		}
+
+		// Compose up --dry-run
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "up", "--build", "--dry-run", "--format", "json")
+		if err != nil || len(calls) != 0 {
+			t.Fatalf("compose up --dry-run failed or executed command: err=%v calls=%v\nout=%s", err, calls, out)
+		}
+		if !strings.Contains(out, `"dryRun": true`) || !strings.Contains(out, `"status": "DRY_RUN"`) {
+			t.Errorf("unexpected compose up --dry-run JSON:\n%s", out)
+		}
+
+		// Verify zero opmem mutations recorded
+		if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
+			events, err := ledger.QueryTimeline("", 10*time.Minute)
+			if err == nil && len(events) != 0 {
+				t.Errorf("expected zero opmem events during --dry-run, got %d: %+v", len(events), events)
+			}
+		}
+	})
+
+	t.Run("single-service up, down, and deploy --dry-run across docker and kubernetes", func(t *testing.T) {
+		resetGlobals(t)
+		dir := chdirTemp(t)
+		if err := os.WriteFile(filepath.Join(dir, "skipper.yaml"), []byte(sampleCompliantSpec), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		stub := &stubRuntimeEngine{
+			name:      "docker",
+			initErr:   errors.New("must not initialize daemon during dry-run"),
+			deployErr: errors.New("must not deploy during dry-run"),
+			stopErr:   errors.New("must not stop during dry-run"),
+		}
+		withStubRuntime(t, stub)
+
+		// Single-service Docker up --dry-run (text + json)
+		out, _, err := executeCLI(t, "up", "-i", "demo-service:preview", "--dry-run")
+		if err != nil || !strings.Contains(out, "[DRY RUN]") || !strings.Contains(out, "demo-service") {
+			t.Fatalf("single docker up --dry-run failed: err=%v out=%s", err, out)
+		}
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "up", "--dry-run", "--format", "json")
+		if err != nil || !strings.Contains(out, `"runtime": "docker"`) || !strings.Contains(out, `"dryRun": true`) {
+			t.Fatalf("single docker up --dry-run json failed: err=%v out=%s", err, out)
+		}
+
+		// Single-service Kubernetes up --dry-run
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "-r", "kubernetes", "-n", "prod", "up", "--dry-run", "--format", "json")
+		if err != nil || !strings.Contains(out, `"runtime": "kubernetes"`) || !strings.Contains(out, "Deployment/demo-service") {
+			t.Fatalf("k8s up --dry-run failed: err=%v out=%s", err, out)
+		}
+
+		// Single-service Docker & Kubernetes down --dry-run
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "down", "--dry-run")
+		if err != nil || !strings.Contains(out, "skipper-demo-service-net") || !strings.Contains(out, "No resources were stopped or deleted") {
+			t.Fatalf("single docker down --dry-run failed: err=%v out=%s", err, out)
+		}
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "-r", "kubernetes", "-n", "staging", "down", "--dry-run", "--format", "json")
+		if err != nil || !strings.Contains(out, `"resourcesToStop"`) || !strings.Contains(out, "Deployment/demo-service") {
+			t.Fatalf("k8s down --dry-run json failed: err=%v out=%s", err, out)
+		}
+
+		// deploy --dry-run runs policy check and skips rollout
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "deploy", "--strategy", "blue-green", "--dry-run", "--format", "json")
+		if err != nil || !strings.Contains(out, `"phase": "DryRun"`) || !strings.Contains(out, `"policyPassed": true`) {
+			t.Fatalf("deploy --dry-run compliant failed: err=%v out=%s", err, out)
+		}
+
+		// Non-compliant spec is still blocked on deploy --dry-run
+		resetGlobals(t)
+		if err := os.WriteFile(filepath.Join(dir, "skipper.yaml"), []byte(sampleNonCompliantSpec), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = executeCLI(t, "deploy", "--dry-run")
+		if err == nil || !strings.Contains(err.Error(), "halted by platform governance policy") {
+			t.Fatalf("expected governance block on deploy --dry-run, got: %v", err)
+		}
+	})
+
+	t.Run("build --dry-run does not execute docker build or mutate skipper.yaml", func(t *testing.T) {
+		resetGlobals(t)
+		dir := chdirTemp(t)
+		specPath := filepath.Join(dir, "skipper.yaml")
+		if err := os.WriteFile(specPath, []byte(sampleCompliantSpec), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/dry\n\ngo 1.25\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		dockerBuildCalled := false
+		withFakeBuilder(t, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+			if name == "pack" {
+				return errors.New("no pack")
+			}
+			dockerBuildCalled = true
+			return errors.New("should not execute docker build")
+		})
+
+		out, _, err := executeCLI(t, "build", "-t", "demo-service:dry", "--save", "--dry-run", "--format", "json")
+		if err != nil {
+			t.Fatalf("single build --dry-run failed: %v\n%s", err, out)
+		}
+		if dockerBuildCalled {
+			t.Fatal("docker build must not be called in --dry-run")
+		}
+		if !strings.Contains(out, `"dryRun": true`) || !strings.Contains(out, `"saved": false`) {
+			t.Errorf("unexpected build --dry-run JSON:\n%s", out)
+		}
+		rawSpec, _ := os.ReadFile(specPath)
+		if strings.Contains(string(rawSpec), "demo-service:dry") {
+			t.Error("build --save --dry-run must not overwrite skipper.yaml")
+		}
+
+		// Compose build --dry-run
+		resetGlobals(t)
+		setupThreeTierDir(t)
+		out, _, err = executeCLI(t, "build", "--dry-run")
+		if err != nil || dockerBuildCalled {
+			t.Fatalf("compose build --dry-run failed or executed build: err=%v out=%s", err, out)
+		}
+		if !strings.Contains(out, "[DRY RUN]") || !strings.Contains(out, "planned") || !strings.Contains(out, "skipped") {
+			t.Errorf("unexpected compose build --dry-run text:\n%s", out)
+		}
+	})
+
+	t.Run("local init and destroy --dry-run do not invoke kind", func(t *testing.T) {
+		origKind := newKindManager
+		newKindManager = func() *local.KindManager {
+			t.Fatal("newKindManager must not be called in local --dry-run")
+			return nil
+		}
+		t.Cleanup(func() { newKindManager = origKind })
+
+		resetGlobals(t)
+		out, _, err := executeCLI(t, "local", "init", "--name", "preview-dev", "--dry-run", "--format", "json")
+		if err != nil || !strings.Contains(out, `"dryRun": true`) || !strings.Contains(out, "preview-dev") {
+			t.Fatalf("local init --dry-run failed: err=%v out=%s", err, out)
+		}
+
+		resetGlobals(t)
+		out, _, err = executeCLI(t, "local", "destroy", "--name", "preview-dev", "--dry-run")
+		if err != nil || !strings.Contains(out, "cluster/preview-dev") || !strings.Contains(out, "No cluster was deleted") {
+			t.Fatalf("local destroy --dry-run failed: err=%v out=%s", err, out)
 		}
 	})
 }

@@ -401,7 +401,7 @@ func parseCPUMillicores(raw string) (float64, error) {
 }
 
 func parseMemoryMiB(raw string) (float64, error) {
-	s := strings.TrimSpace(raw)
+	s := config.NormalizeKubernetesMemory(raw)
 	if s == "" {
 		return 0, fmt.Errorf("empty memory quantity")
 	}
@@ -416,6 +416,7 @@ func parseMemoryMiB(raw string) (float64, error) {
 		{"T", 1e12 / (1024.0 * 1024.0)},
 		{"G", 1e9 / (1024.0 * 1024.0)},
 		{"M", 1e6 / (1024.0 * 1024.0)},
+		{"k", 1e3 / (1024.0 * 1024.0)},
 		{"K", 1e3 / (1024.0 * 1024.0)},
 	}
 	for _, item := range suffixes {

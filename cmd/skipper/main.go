@@ -147,6 +147,7 @@ func newBuildCmd() *cobra.Command {
 	var composeFile string
 	var servicesFilter []string
 	var discoverFlag bool
+	var dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "build",
@@ -159,10 +160,10 @@ func newBuildCmd() *cobra.Command {
 
 			// Determine build mode
 			if strings.TrimSpace(composeFile) != "" {
-				return runMultiServiceComposeBuild(cmd, composeFile, false, servicesFilter, imageTag, saveTag)
+				return runMultiServiceComposeBuild(cmd, composeFile, false, servicesFilter, imageTag, saveTag, dryRun)
 			}
 			if discoverFlag {
-				return runMultiServiceDiscoverBuild(cmd, servicesFilter, imageTag, saveTag)
+				return runMultiServiceDiscoverBuild(cmd, servicesFilter, imageTag, saveTag, dryRun)
 			}
 
 			hasExplicitSpec := appConfigFile != "" || fileExists("skipper.yaml") || fileExists("app.yaml")
@@ -170,14 +171,14 @@ func newBuildCmd() *cobra.Command {
 				if len(servicesFilter) > 0 {
 					return fmt.Errorf("--service requires compose or discover mode")
 				}
-				return runSingleServiceBuild(cmd, imageTag, saveTag)
+				return runSingleServiceBuild(cmd, imageTag, saveTag, dryRun)
 			}
 
 			if cf, err := transpile.FindComposeFile("."); err == nil {
-				return runMultiServiceComposeBuild(cmd, cf, true, servicesFilter, imageTag, saveTag)
+				return runMultiServiceComposeBuild(cmd, cf, true, servicesFilter, imageTag, saveTag, dryRun)
 			}
 
-			return runMultiServiceDiscoverBuild(cmd, servicesFilter, imageTag, saveTag)
+			return runMultiServiceDiscoverBuild(cmd, servicesFilter, imageTag, saveTag, dryRun)
 		},
 	}
 	cmd.Flags().StringVarP(&imageTag, "tag", "t", "", "Override target OCI image tag (e.g. my-app:v1.0.0)")
@@ -185,6 +186,7 @@ func newBuildCmd() *cobra.Command {
 	cmd.Flags().StringVar(&composeFile, "compose", "", "Path to Docker Compose file for multi-service builds")
 	cmd.Flags().StringSliceVar(&servicesFilter, "service", nil, "Build only specified service(s) in compose or discover mode")
 	cmd.Flags().BoolVar(&discoverFlag, "discover", false, "Scan subdirectories (depth 2) and build discovered services")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview detected stack, build commands, and synthesized Dockerfiles without building")
 	return cmd
 }
 
@@ -193,7 +195,7 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func runSingleServiceBuild(cmd *cobra.Command, imageTag string, saveTag bool) error {
+func runSingleServiceBuild(cmd *cobra.Command, imageTag string, saveTag, dryRun bool) error {
 	spec, err := loadSpec()
 	if err != nil {
 		return err
@@ -207,6 +209,47 @@ func runSingleServiceBuild(cmd *cobra.Command, imageTag string, saveTag bool) er
 	progressOut := cmd.OutOrStdout()
 	if outputFormat == "json" {
 		progressOut = cmd.ErrOrStderr()
+	}
+
+	if dryRun {
+		plan, err := builder.Plan(ctx, spec)
+		if err != nil {
+			return err
+		}
+		out := cmd.OutOrStdout()
+		if outputFormat == "json" {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			return enc.Encode(map[string]interface{}{
+				"dryRun":                true,
+				"service":               spec.Name,
+				"image":                 plan.Image,
+				"runtime":               plan.Runtime,
+				"strategy":              plan.Strategy,
+				"context":               plan.Context,
+				"command":               plan.Command,
+				"synthesizedDockerfile": plan.SynthesizedDockerfile,
+				"status":                "DRY_RUN",
+				"saved":                 false,
+			})
+		}
+		fmt.Fprintf(out, "==> [DRY RUN] Build plan for '%s':\n", spec.Name)
+		fmt.Fprintf(out, "  Stack:    %s\n", plan.Runtime)
+		fmt.Fprintf(out, "  Strategy: %s\n", plan.Strategy)
+		fmt.Fprintf(out, "  Context:  %s\n", plan.Context)
+		fmt.Fprintf(out, "  Image:    %s\n", plan.Image)
+		fmt.Fprintf(out, "  Command:  %s\n", strings.Join(plan.Command, " "))
+		if saveTag {
+			fmt.Fprintf(out, "  Note:     --save would update '%s' (skipped in --dry-run)\n", resolveConfigPath())
+		}
+		if plan.SynthesizedDockerfile != "" {
+			fmt.Fprintf(out, "\n--- Synthesized Dockerfile Preview ---\n%s", plan.SynthesizedDockerfile)
+			if !strings.HasSuffix(plan.SynthesizedDockerfile, "\n") {
+				fmt.Fprintln(out)
+			}
+		}
+		fmt.Fprintln(out, "No image was built (--dry-run).")
+		return nil
 	}
 
 	tag, err := builder.Build(ctx, spec, progressOut)
@@ -252,7 +295,7 @@ func runSingleServiceBuild(cmd *cobra.Command, imageTag string, saveTag bool) er
 	return nil
 }
 
-func runMultiServiceComposeBuild(cmd *cobra.Command, composePath string, autoDetected bool, servicesFilter []string, imageTag string, saveTag bool) error {
+func runMultiServiceComposeBuild(cmd *cobra.Command, composePath string, autoDetected bool, servicesFilter []string, imageTag string, saveTag, dryRun bool) error {
 	proj, err := transpile.LoadComposeProject(composePath)
 	if err != nil {
 		return err
@@ -295,10 +338,10 @@ func runMultiServiceComposeBuild(cmd *cobra.Command, composePath string, autoDet
 		})
 	}
 
-	return executeMultiServiceBuild(cmd, proj.Name, "compose", targets, servicesFilter, imageTag, saveTag, progressOut)
+	return executeMultiServiceBuild(cmd, proj.Name, "compose", targets, servicesFilter, imageTag, saveTag, dryRun, progressOut)
 }
 
-func runMultiServiceDiscoverBuild(cmd *cobra.Command, servicesFilter []string, imageTag string, saveTag bool) error {
+func runMultiServiceDiscoverBuild(cmd *cobra.Command, servicesFilter []string, imageTag string, saveTag, dryRun bool) error {
 	builder := newCNBBuilder()
 	ctx := context.Background()
 
@@ -339,10 +382,10 @@ func runMultiServiceDiscoverBuild(cmd *cobra.Command, servicesFilter []string, i
 		})
 	}
 
-	return executeMultiServiceBuild(cmd, projectName, "discover", targets, servicesFilter, imageTag, saveTag, progressOut)
+	return executeMultiServiceBuild(cmd, projectName, "discover", targets, servicesFilter, imageTag, saveTag, dryRun, progressOut)
 }
 
-func executeMultiServiceBuild(cmd *cobra.Command, projectName, mode string, targets []build.ServiceBuildTarget, servicesFilter []string, imageTag string, saveTag bool, progressOut io.Writer) error {
+func executeMultiServiceBuild(cmd *cobra.Command, projectName, mode string, targets []build.ServiceBuildTarget, servicesFilter []string, imageTag string, saveTag, dryRun bool, progressOut io.Writer) error {
 	if saveTag {
 		return fmt.Errorf("--save is not supported in %s mode (no skipper.yaml target)", mode)
 	}
@@ -386,6 +429,87 @@ func executeMultiServiceBuild(cmd *cobra.Command, projectName, mode string, targ
 	}
 
 	builder := newCNBBuilder()
+	if dryRun {
+		type multiBuildPlanItem struct {
+			Service    string   `json:"service"`
+			Status     string   `json:"status"`
+			Image      string   `json:"image,omitempty"`
+			Runtime    string   `json:"runtime,omitempty"`
+			Strategy   string   `json:"strategy,omitempty"`
+			Command    []string `json:"command,omitempty"`
+			SkipReason string   `json:"skipReason,omitempty"`
+			Error      string   `json:"error,omitempty"`
+		}
+
+		items := make([]multiBuildPlanItem, 0, len(targets))
+		failedCount := 0
+		for _, t := range targets {
+			if t.SkipReason != "" {
+				img := ""
+				if t.Spec != nil {
+					img = t.Spec.Image
+				}
+				items = append(items, multiBuildPlanItem{
+					Service:    t.Name,
+					Status:     "skipped",
+					Image:      img,
+					SkipReason: t.SkipReason,
+				})
+				continue
+			}
+			plan, planErr := builder.Plan(context.Background(), t.Spec)
+			if planErr != nil {
+				failedCount++
+				items = append(items, multiBuildPlanItem{
+					Service: t.Name,
+					Status:  "failed",
+					Error:   planErr.Error(),
+				})
+				continue
+			}
+			items = append(items, multiBuildPlanItem{
+				Service:  t.Name,
+				Status:   "planned",
+				Image:    plan.Image,
+				Runtime:  string(plan.Runtime),
+				Strategy: plan.Strategy,
+				Command:  plan.Command,
+			})
+		}
+
+		out := cmd.OutOrStdout()
+		if outputFormat == "json" {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(map[string]interface{}{
+				"dryRun":  true,
+				"project": projectName,
+				"mode":    mode,
+				"plans":   items,
+			}); err != nil {
+				return err
+			}
+		} else {
+			fmt.Fprintf(out, "==> [DRY RUN] Build plan (%s project '%s'):\n", mode, projectName)
+			fmt.Fprintf(out, "%-20s %-10s %-32s %s\n", "SERVICE", "STATUS", "IMAGE", "STRATEGY / DETAILS")
+			for _, it := range items {
+				detail := it.Strategy
+				if it.SkipReason != "" {
+					detail = it.SkipReason
+				} else if it.Error != "" {
+					detail = "error: " + it.Error
+				}
+				fmt.Fprintf(out, "%-20s %-10s %-32s %s\n", it.Service, it.Status, it.Image, detail)
+			}
+			fmt.Fprintln(out, "No images were built (--dry-run).")
+		}
+		if failedCount > 0 {
+			return fmt.Errorf("%d of %d services failed build planning", failedCount, len(items))
+		}
+		return nil
+	}
+
 	results := builder.BuildAll(context.Background(), targets, progressOut)
 
 	if ledger, err := opmem.NewOperationalMemoryLedger(""); err == nil {
@@ -450,6 +574,7 @@ func newDeployCmd() *cobra.Command {
 	var strategy string
 	var autoRollback bool
 	var imageOverride string
+	var dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "deploy",
@@ -483,6 +608,38 @@ func newDeployCmd() *cobra.Command {
 			}
 			if hasBlocker {
 				return fmt.Errorf("deployment halted by platform governance policy")
+			}
+
+			if dryRun {
+				effImage := strings.TrimSpace(spec.Image)
+				if effImage == "" {
+					effImage = fmt.Sprintf("%s:latest", spec.Name)
+				}
+				steps := []int{10, 25, 50, 100}
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]interface{}{
+						"dryRun":       true,
+						"workload":     spec.Name,
+						"image":        effImage,
+						"runtime":      targetRuntime,
+						"namespace":    namespace,
+						"phase":        "DryRun",
+						"strategy":     strategy,
+						"steps":        steps,
+						"autoRollback": autoRollback,
+						"policyPassed": true,
+					})
+				}
+				fmt.Fprintf(out, "==> [DRY RUN] Progressive rollout plan for '%s':\n", spec.Name)
+				fmt.Fprintf(out, "  Target:        %s (namespace: %s)\n", targetRuntime, namespace)
+				fmt.Fprintf(out, "  Image:         %s\n", effImage)
+				fmt.Fprintf(out, "  Strategy:      %s (steps: 10%% -> 25%% -> 50%% -> 100%%)\n", strategy)
+				fmt.Fprintf(out, "  Auto-rollback: %v\n", autoRollback)
+				fmt.Fprintln(out, "  Policy audit:  PASSED")
+				fmt.Fprintln(out, "No rollout executed (--dry-run).")
+				return nil
 			}
 
 			engine := getRuntimeAdapter()
@@ -548,6 +705,7 @@ func newDeployCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&strategy, "strategy", "s", "canary", "Rollout strategy: 'canary' or 'blue-green'")
 	cmd.Flags().BoolVar(&autoRollback, "auto-rollback", true, "Automatically rollback on health gate failure")
 	cmd.Flags().StringVarP(&imageOverride, "image", "i", "", "Override target OCI image tag for this deployment")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Validate policies and preview progressive rollout plan without executing")
 	return cmd
 }
 
@@ -702,7 +860,7 @@ func printComposeStatusTable(out io.Writer, statuses []runtime.ComposeServiceSta
 	}
 }
 
-func runComposeUp(cmd *cobra.Command, composePath string, autoDetected bool, servicesFilter []string, buildFlag bool) error {
+func runComposeUp(cmd *cobra.Command, composePath string, autoDetected bool, servicesFilter []string, buildFlag, dryRun bool) error {
 	proj, selected, err := loadAndValidateComposeServices(composePath, servicesFilter)
 	if err != nil {
 		return err
@@ -717,6 +875,97 @@ func runComposeUp(cmd *cobra.Command, composePath string, autoDetected bool, ser
 	if autoDetected {
 		fmt.Fprintf(progressOut, "==> No skipper.yaml found; using %s (project: %s)\n", composePath, proj.Name)
 	}
+
+	if dryRun {
+		args, err := runtime.BuildComposeUpArgs(runtime.ComposeUpOptions{
+			File:     composePath,
+			Services: selected,
+			Build:    buildFlag,
+			Detach:   true,
+		})
+		if err != nil {
+			return err
+		}
+		fullCmd := append([]string{"docker"}, args...)
+
+		filterSet := make(map[string]bool, len(selected))
+		for _, s := range selected {
+			filterSet[s] = true
+		}
+
+		type plannedComposeSvc struct {
+			Service string `json:"service"`
+			Image   string `json:"image"`
+			Action  string `json:"action"`
+		}
+		plannedServices := make([]plannedComposeSvc, 0, len(proj.Services))
+		for _, svc := range proj.Services {
+			if len(filterSet) > 0 && !filterSet[svc.Name] {
+				continue
+			}
+			img := svc.Image
+			if img == "" {
+				img = fmt.Sprintf("%s-%s:latest", proj.Name, transpile.SanitizeName(svc.Name))
+			}
+			action := "start"
+			if buildFlag && svc.HasBuild {
+				action = "build+start"
+			}
+			plannedServices = append(plannedServices, plannedComposeSvc{
+				Service: svc.Name,
+				Image:   img,
+				Action:  action,
+			})
+		}
+
+		netNames := make([]string, 0, len(proj.Networks))
+		for _, n := range proj.Networks {
+			netNames = append(netNames, n.Name)
+		}
+		volNames := make([]string, 0, len(proj.Volumes))
+		for _, v := range proj.Volumes {
+			volNames = append(volNames, v.Name)
+		}
+
+		if outputFormat == "json" {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			return enc.Encode(map[string]interface{}{
+				"dryRun":   true,
+				"mode":     "compose",
+				"project":  proj.Name,
+				"file":     composePath,
+				"status":   "DRY_RUN",
+				"build":    buildFlag,
+				"services": plannedServices,
+				"networks": netNames,
+				"volumes":  volNames,
+				"command":  fullCmd,
+			})
+		}
+
+		fmt.Fprintf(out, "==> [DRY RUN] Startup plan for Compose project '%s' (%s):\n", proj.Name, composePath)
+		fmt.Fprintln(out, "  Services to start/recreate:")
+		for _, ps := range plannedServices {
+			fmt.Fprintf(out, "    - %s (image: %s, action: %s)\n", ps.Service, ps.Image, ps.Action)
+		}
+		if len(netNames) > 0 {
+			fmt.Fprintln(out, "  Networks to ensure:")
+			for _, n := range netNames {
+				fmt.Fprintf(out, "    - %s\n", n)
+			}
+		}
+		if len(volNames) > 0 {
+			fmt.Fprintln(out, "  Volumes to ensure:")
+			for _, v := range volNames {
+				fmt.Fprintf(out, "    - %s\n", v)
+			}
+		}
+		fmt.Fprintf(out, "  Command: %s\n", strings.Join(fullCmd, " "))
+		fmt.Fprintln(out, "No containers or networks were created (--dry-run).")
+		return nil
+	}
+
 	fmt.Fprintf(progressOut, "==> Starting Compose services from '%s' (project: %s)...\n", composePath, proj.Name)
 
 	ctx := context.Background()
@@ -820,7 +1069,7 @@ func runComposeStatus(cmd *cobra.Command, composePath string, autoDetected bool,
 	return nil
 }
 
-func runComposeDown(cmd *cobra.Command, composePath string, autoDetected bool, removeVolumes bool) error {
+func runComposeDown(cmd *cobra.Command, composePath string, autoDetected bool, removeVolumes, dryRun bool) error {
 	proj, err := transpile.LoadComposeProject(composePath)
 	if err != nil {
 		return err
@@ -835,6 +1084,92 @@ func runComposeDown(cmd *cobra.Command, composePath string, autoDetected bool, r
 	if autoDetected {
 		fmt.Fprintf(progressOut, "==> No skipper.yaml found; using %s (project: %s)\n", composePath, proj.Name)
 	}
+
+	if dryRun {
+		args, err := runtime.BuildComposeDownArgs(runtime.ComposeDownOptions{
+			File:          composePath,
+			RemoveVolumes: removeVolumes,
+			RemoveOrphans: true,
+		})
+		if err != nil {
+			return err
+		}
+		fullCmd := append([]string{"docker"}, args...)
+
+		serviceNames := make([]string, 0, len(proj.Services))
+		serviceImages := make(map[string]string, len(proj.Services))
+		for _, svc := range proj.Services {
+			serviceNames = append(serviceNames, svc.Name)
+			img := svc.Image
+			if img == "" {
+				img = fmt.Sprintf("%s-%s:latest", proj.Name, transpile.SanitizeName(svc.Name))
+			}
+			serviceImages[svc.Name] = img
+		}
+
+		networksToRemove := []string{}
+		for _, n := range proj.Networks {
+			if !n.External {
+				networksToRemove = append(networksToRemove, n.Name)
+			}
+		}
+
+		volumesToDelete := []string{}
+		volumesPreserved := []string{}
+		for _, v := range proj.Volumes {
+			if removeVolumes && !v.External {
+				volumesToDelete = append(volumesToDelete, v.Name)
+			} else {
+				volumesPreserved = append(volumesPreserved, v.Name)
+			}
+		}
+
+		if outputFormat == "json" {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			return enc.Encode(map[string]interface{}{
+				"dryRun":           true,
+				"mode":             "compose",
+				"project":          proj.Name,
+				"file":             composePath,
+				"status":           "DRY_RUN",
+				"volumesRemoved":   removeVolumes,
+				"servicesToStop":   serviceNames,
+				"networksToRemove": networksToRemove,
+				"volumesToDelete":  volumesToDelete,
+				"volumesPreserved": volumesPreserved,
+				"command":          fullCmd,
+			})
+		}
+
+		fmt.Fprintf(out, "==> [DRY RUN] Teardown plan for Compose project '%s' (%s):\n", proj.Name, composePath)
+		fmt.Fprintln(out, "  Containers to stop & remove:")
+		for _, svcName := range serviceNames {
+			fmt.Fprintf(out, "    - %s (image: %s)\n", svcName, serviceImages[svcName])
+		}
+		if len(networksToRemove) > 0 {
+			fmt.Fprintln(out, "  Networks to remove:")
+			for _, n := range networksToRemove {
+				fmt.Fprintf(out, "    - %s\n", n)
+			}
+		}
+		if len(volumesToDelete) > 0 {
+			fmt.Fprintln(out, "  Volumes to DELETE (-v):")
+			for _, v := range volumesToDelete {
+				fmt.Fprintf(out, "    - %s\n", v)
+			}
+		}
+		if len(volumesPreserved) > 0 {
+			fmt.Fprintln(out, "  Volumes preserved:")
+			for _, v := range volumesPreserved {
+				fmt.Fprintf(out, "    - %s\n", v)
+			}
+		}
+		fmt.Fprintf(out, "  Command: %s\n", strings.Join(fullCmd, " "))
+		fmt.Fprintln(out, "No resources were stopped or deleted (--dry-run).")
+		return nil
+	}
+
 	fmt.Fprintf(progressOut, "==> Stopping Compose project '%s' (%s)...\n", proj.Name, composePath)
 
 	runner := newComposeRunner()
@@ -881,6 +1216,7 @@ func newUpCmd() *cobra.Command {
 	var composeFile string
 	var servicesFilter []string
 	var buildFlag bool
+	var dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "up",
@@ -890,7 +1226,7 @@ func newUpCmd() *cobra.Command {
 				if targetRuntime != "docker" {
 					return fmt.Errorf("--compose is only supported with the docker runtime")
 				}
-				return runComposeUp(cmd, strings.TrimSpace(composeFile), false, servicesFilter, buildFlag)
+				return runComposeUp(cmd, strings.TrimSpace(composeFile), false, servicesFilter, buildFlag, dryRun)
 			}
 
 			hasExplicitSpec := appConfigFile != "" || fileExists("skipper.yaml") || fileExists("app.yaml")
@@ -900,7 +1236,7 @@ func newUpCmd() *cobra.Command {
 				}
 			} else if targetRuntime == "docker" {
 				if cf, err := transpile.FindComposeFile("."); err == nil {
-					return runComposeUp(cmd, cf, true, servicesFilter, buildFlag)
+					return runComposeUp(cmd, cf, true, servicesFilter, buildFlag, dryRun)
 				}
 			}
 
@@ -915,6 +1251,84 @@ func newUpCmd() *cobra.Command {
 			if strings.TrimSpace(imageOverride) != "" {
 				spec.Image = strings.TrimSpace(imageOverride)
 			}
+
+			out := cmd.OutOrStdout()
+			if dryRun {
+				if targetRuntime == "kubernetes" {
+					k8s := runtime.NewKubernetesAdapter(namespace)
+					manifest, err := k8s.GenerateStandardManifests(spec)
+					if err != nil {
+						return err
+					}
+					resources := []string{"Deployment/" + spec.Name}
+					if len(spec.Endpoints) > 0 {
+						resources = append(resources, "Service/"+spec.Name)
+					}
+					fullCmd := []string{"kubectl", "apply", "-n", namespace, "-f", "-"}
+					if outputFormat == "json" {
+						enc := json.NewEncoder(out)
+						enc.SetIndent("", "  ")
+						return enc.Encode(map[string]interface{}{
+							"dryRun":    true,
+							"mode":      "single",
+							"workload":  spec.Name,
+							"runtime":   "kubernetes",
+							"namespace": namespace,
+							"status":    "DRY_RUN",
+							"resources": resources,
+							"command":   fullCmd,
+							"manifest":  manifest,
+						})
+					}
+					fmt.Fprintf(out, "==> [DRY RUN] Kubernetes apply plan for '%s' (namespace: %s):\n", spec.Name, namespace)
+					fmt.Fprintln(out, "  Resources to apply:")
+					for _, r := range resources {
+						fmt.Fprintf(out, "    - %s\n", r)
+					}
+					fmt.Fprintf(out, "  Command: %s\n", strings.Join(fullCmd, " "))
+					fmt.Fprintf(out, "\n--- Manifest Preview ---\n%s", manifest)
+					if !strings.HasSuffix(manifest, "\n") {
+						fmt.Fprintln(out)
+					}
+					fmt.Fprintln(out, "No cluster resources were modified (--dry-run).")
+					return nil
+				}
+
+				plan, err := runtime.BuildDockerDeployPlan(spec)
+				if err != nil {
+					return err
+				}
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]interface{}{
+						"dryRun":     true,
+						"mode":       "single",
+						"workload":   plan.Workload,
+						"image":      plan.Image,
+						"runtime":    "docker",
+						"status":     "DRY_RUN",
+						"network":    plan.Network,
+						"containers": plan.Containers,
+						"commands":   plan.Commands,
+					})
+				}
+				fmt.Fprintf(out, "==> [DRY RUN] Startup plan for '%s' on target [docker]:\n", spec.Name)
+				fmt.Fprintln(out, "  Containers to create/recreate:")
+				for _, c := range plan.Containers {
+					fmt.Fprintf(out, "    - %s\n", c)
+				}
+				if plan.Network != "" {
+					fmt.Fprintf(out, "  Network to ensure:\n    - %s\n", plan.Network)
+				}
+				fmt.Fprintln(out, "  Commands:")
+				for _, c := range plan.Commands {
+					fmt.Fprintf(out, "    %s\n", strings.Join(c, " "))
+				}
+				fmt.Fprintln(out, "No containers or networks were created (--dry-run).")
+				return nil
+			}
+
 			engine := getRuntimeAdapter()
 			ctx := context.Background()
 
@@ -922,7 +1336,6 @@ func newUpCmd() *cobra.Command {
 				return err
 			}
 
-			out := cmd.OutOrStdout()
 			if outputFormat != "json" {
 				fmt.Fprintf(out, "==> Deploying '%s' to target runtime [%s]...\n", spec.Name, engine.Name())
 			}
@@ -957,6 +1370,7 @@ func newUpCmd() *cobra.Command {
 	cmd.Flags().StringVar(&composeFile, "compose", "", "Path to Docker Compose file for multi-service lifecycle")
 	cmd.Flags().StringSliceVar(&servicesFilter, "service", nil, "Start only specified service(s) in compose mode")
 	cmd.Flags().BoolVar(&buildFlag, "build", false, "Build images before starting containers in compose mode")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview containers, networks, or manifests to be created without executing")
 	return cmd
 }
 
@@ -1387,6 +1801,7 @@ func newTimeTravelCmd() *cobra.Command {
 func newDownCmd() *cobra.Command {
 	var composeFile string
 	var removeVolumes bool
+	var dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "down [name]",
@@ -1396,13 +1811,13 @@ func newDownCmd() *cobra.Command {
 				if targetRuntime != "docker" {
 					return fmt.Errorf("--compose is only supported with the docker runtime")
 				}
-				return runComposeDown(cmd, strings.TrimSpace(composeFile), false, removeVolumes)
+				return runComposeDown(cmd, strings.TrimSpace(composeFile), false, removeVolumes, dryRun)
 			}
 
 			hasExplicitSpec := len(args) > 0 || appConfigFile != "" || fileExists("skipper.yaml") || fileExists("app.yaml")
 			if !hasExplicitSpec && targetRuntime == "docker" {
 				if cf, err := transpile.FindComposeFile("."); err == nil {
-					return runComposeDown(cmd, cf, true, removeVolumes)
+					return runComposeDown(cmd, cf, true, removeVolumes, dryRun)
 				}
 			}
 
@@ -1416,6 +1831,73 @@ func newDownCmd() *cobra.Command {
 			}
 			if strings.TrimSpace(workloadName) == "" {
 				return fmt.Errorf("workload name required")
+			}
+
+			if dryRun {
+				out := cmd.OutOrStdout()
+				if targetRuntime == "kubernetes" {
+					if strings.HasPrefix(strings.TrimSpace(workloadName), "-") || strings.ContainsAny(workloadName, " \t\r\n\x00") {
+						return fmt.Errorf("invalid workload name %q", workloadName)
+					}
+					if strings.HasPrefix(strings.TrimSpace(namespace), "-") || strings.ContainsAny(namespace, " \t\r\n\x00") {
+						return fmt.Errorf("invalid namespace %q", namespace)
+					}
+					cmdSlice := []string{"kubectl", "scale", "deployment", workloadName, "-n", namespace, "--replicas=0"}
+					if outputFormat == "json" {
+						enc := json.NewEncoder(out)
+						enc.SetIndent("", "  ")
+						return enc.Encode(map[string]interface{}{
+							"dryRun":          true,
+							"mode":            "single",
+							"workload":        workloadName,
+							"runtime":         "kubernetes",
+							"namespace":       namespace,
+							"status":          "DRY_RUN",
+							"resourcesToStop": []string{"Deployment/" + workloadName},
+							"commands":        [][]string{cmdSlice},
+						})
+					}
+					fmt.Fprintf(out, "==> [DRY RUN] Teardown plan for '%s' on target [kubernetes] (namespace: %s):\n", workloadName, namespace)
+					fmt.Fprintf(out, "  Resources to scale to 0 replicas:\n    - Deployment/%s (Services and PVCs preserved)\n", workloadName)
+					fmt.Fprintf(out, "  Command: %s\n", strings.Join(cmdSlice, " "))
+					fmt.Fprintln(out, "No resources were modified (--dry-run).")
+					return nil
+				}
+
+				containers, netName, commands, err := runtime.BuildDockerStopPlan(workloadName, spec)
+				if err != nil {
+					return err
+				}
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]interface{}{
+						"dryRun":             true,
+						"mode":               "single",
+						"workload":           workloadName,
+						"runtime":            "docker",
+						"status":             "DRY_RUN",
+						"containersToRemove": containers,
+						"networksToRemove":   []string{netName},
+						"commands":           commands,
+					})
+				}
+				fmt.Fprintf(out, "==> [DRY RUN] Teardown plan for '%s' on target [docker]:\n", workloadName)
+				fmt.Fprintln(out, "  Containers to stop & remove:")
+				for i, c := range containers {
+					if i == 0 {
+						fmt.Fprintf(out, "    - %s (+ any dependency containers labeled skipper.parent=%s)\n", c, workloadName)
+					} else {
+						fmt.Fprintf(out, "    - %s\n", c)
+					}
+				}
+				fmt.Fprintf(out, "  Networks to remove (if present):\n    - %s\n", netName)
+				fmt.Fprintln(out, "  Commands:")
+				for _, c := range commands {
+					fmt.Fprintf(out, "    %s\n", strings.Join(c, " "))
+				}
+				fmt.Fprintln(out, "No resources were stopped or deleted (--dry-run).")
+				return nil
 			}
 
 			engine := getRuntimeAdapter()
@@ -1448,11 +1930,15 @@ func newDownCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&composeFile, "compose", "", "Path to Docker Compose file for multi-service teardown")
 	cmd.Flags().BoolVarP(&removeVolumes, "volumes", "v", false, "Remove named volumes declared in the Compose file")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview containers, networks, and volumes that will be stopped or deleted without executing")
 	return cmd
 }
 
 func newLocalCmd() *cobra.Command {
 	clusterName := "app-dev"
+	var initDryRun bool
+	var destroyDryRun bool
+
 	localCmd := &cobra.Command{
 		Use:   "local",
 		Short: "Manage local zero-friction Kubernetes clusters (Kind)",
@@ -1462,6 +1948,30 @@ func newLocalCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Initialize an ingress-ready local Kubernetes cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if initDryRun {
+				if err := local.ValidateClusterName(clusterName); err != nil {
+					return err
+				}
+				cmdSlice := []string{"kind", "create", "cluster", "--name", clusterName, "--config", "-"}
+				out := cmd.OutOrStdout()
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]interface{}{
+						"cluster": clusterName,
+						"dryRun":  true,
+						"active":  false,
+						"status":  "DRY_RUN",
+						"command": cmdSlice,
+					})
+				}
+				fmt.Fprintf(out, "==> [DRY RUN] Local Kind cluster creation plan for '%s':\n", clusterName)
+				fmt.Fprintf(out, "  Cluster:       %s (ingress-ready, ports 80/TCP and 443/TCP)\n", clusterName)
+				fmt.Fprintf(out, "  Command:       %s\n", strings.Join(cmdSlice, " "))
+				fmt.Fprintln(out, "No cluster was created (--dry-run).")
+				return nil
+			}
+
 			km := newKindManager()
 			ctx := context.Background()
 			out := cmd.OutOrStdout()
@@ -1504,11 +2014,45 @@ func newLocalCmd() *cobra.Command {
 			return nil
 		},
 	}
+	initCmd.Flags().BoolVar(&initDryRun, "dry-run", false, "Preview Kind cluster creation plan without creating cluster")
 
 	destroyCmd := &cobra.Command{
 		Use:   "destroy",
 		Short: "Tear down the local Kubernetes cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if destroyDryRun {
+				if err := local.ValidateClusterName(clusterName); err != nil {
+					return err
+				}
+				cmdSlice := []string{"kind", "delete", "cluster", "--name", clusterName}
+				resources := []string{
+					"cluster/" + clusterName,
+					"container/" + clusterName + "-control-plane",
+					"kubeconfig-context/kind-" + clusterName,
+				}
+				out := cmd.OutOrStdout()
+				if outputFormat == "json" {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]interface{}{
+						"cluster":           clusterName,
+						"dryRun":            true,
+						"active":            false,
+						"status":            "DRY_RUN",
+						"resourcesToDelete": resources,
+						"command":           cmdSlice,
+					})
+				}
+				fmt.Fprintf(out, "==> [DRY RUN] Teardown plan for local Kind cluster '%s':\n", clusterName)
+				fmt.Fprintln(out, "  Resources to delete:")
+				for _, r := range resources {
+					fmt.Fprintf(out, "    - %s\n", r)
+				}
+				fmt.Fprintf(out, "  Command: %s\n", strings.Join(cmdSlice, " "))
+				fmt.Fprintln(out, "No cluster was deleted (--dry-run).")
+				return nil
+			}
+
 			km := newKindManager()
 			ctx := context.Background()
 			out := cmd.OutOrStdout()
@@ -1531,6 +2075,7 @@ func newLocalCmd() *cobra.Command {
 			return nil
 		},
 	}
+	destroyCmd.Flags().BoolVar(&destroyDryRun, "dry-run", false, "Preview Kind cluster deletion plan without deleting cluster")
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
@@ -2116,6 +2661,7 @@ func newExplainCmd() *cobra.Command {
 					},
 					Playbook: []explainPlaybookEntry{
 						{Task: "Check Workstation Status", Command: "skipper doctor -f json"},
+						{Task: "Preview Lifecycle Plans (Dry-Run)", Command: "skipper build|up|down|deploy --dry-run -f json"},
 						{Task: "Audit Policies Before Deploy", Command: "skipper policy-check -f json"},
 						{Task: "Compile Kubernetes Manifests", Command: "skipper manifest"},
 						{Task: "Diagnose Failing Workloads", Command: "skipper diagnose <name> -f json"},
@@ -2171,6 +2717,7 @@ Skipper translates a declarative 'skipper.yaml' into standard OCI containers and
 
 ## 2. Command Execution Playbook for AI Agents
 - Check Workstation Status: run 'skipper doctor -f json'
+- Preview Lifecycle Plans (Dry-Run): run 'skipper build|up|down|deploy --dry-run -f json'
 - Audit Policies Before Deploy: run 'skipper policy-check -f json'
 - Compile Kubernetes Manifests: run 'skipper manifest'
 - Diagnose Failing Workloads: run 'skipper diagnose <name> -f json'

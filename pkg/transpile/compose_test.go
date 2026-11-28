@@ -72,3 +72,48 @@ func TestTranspileSecurityAndEdgeCases(t *testing.T) {
 		t.Fatalf("expected TranspileCompose to reject missing target service")
 	}
 }
+
+func TestTranspileComposeNormalizesResources(t *testing.T) {
+	composeYaml := `
+services:
+  api:
+    image: node:20-alpine
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.25"
+          memory: 256mb
+  tiny:
+    image: alpine
+    deploy:
+      resources:
+        limits:
+          cpus: "0.05"
+          memory: 64m
+`
+	tr := NewTranspiler()
+	apiSpec, err := tr.TranspileCompose([]byte(composeYaml), "api")
+	if err != nil {
+		t.Fatalf("TranspileCompose api failed: %v", err)
+	}
+	if apiSpec.Runtime.Resources.Memory.Limit != "512Mi" || apiSpec.Runtime.Resources.Memory.Request != "256Mi" {
+		t.Fatalf("expected normalized memory 256Mi/512Mi, got %+v", apiSpec.Runtime.Resources.Memory)
+	}
+	if apiSpec.Runtime.Resources.CPU.Limit != "500m" || apiSpec.Runtime.Resources.CPU.Request != "250m" {
+		t.Fatalf("expected normalized CPU 250m/500m, got %+v", apiSpec.Runtime.Resources.CPU)
+	}
+
+	tinySpec, err := tr.TranspileCompose([]byte(composeYaml), "tiny")
+	if err != nil {
+		t.Fatalf("TranspileCompose tiny failed: %v", err)
+	}
+	if tinySpec.Runtime.Resources.Memory.Limit != "64Mi" || tinySpec.Runtime.Resources.Memory.Request != "64Mi" {
+		t.Fatalf("expected clamped memory request=limit=64Mi, got %+v", tinySpec.Runtime.Resources.Memory)
+	}
+	if tinySpec.Runtime.Resources.CPU.Limit != "50m" || tinySpec.Runtime.Resources.CPU.Request != "50m" {
+		t.Fatalf("expected clamped CPU request=limit=50m, got %+v", tinySpec.Runtime.Resources.CPU)
+	}
+}
