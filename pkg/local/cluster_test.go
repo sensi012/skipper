@@ -91,6 +91,20 @@ func TestBuildKindConfig(t *testing.T) {
 }
 
 func TestKindManagerExists(t *testing.T) {
+	t.Run("rejects unsafe cluster names", func(t *testing.T) {
+		for _, bad := range []string{"", " ", "-bad", "bad name", "bad\nname"} {
+			if err := ValidateClusterName(bad); err == nil {
+				t.Errorf("expected ValidateClusterName(%q) to fail", bad)
+			}
+		}
+		if err := ValidateClusterName("skipper-dev"); err != nil {
+			t.Errorf("expected skipper-dev to be valid, got %v", err)
+		}
+		if !strings.Contains(KindConfigYAML(), "ingress-ready=true") {
+			t.Errorf("expected KindConfigYAML to contain ingress-ready label")
+		}
+	})
+
 	t.Run("finds matching cluster in multi-line CRLF output", func(t *testing.T) {
 		var calls [][]string
 		km := &KindManager{

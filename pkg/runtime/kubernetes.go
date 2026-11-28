@@ -232,19 +232,19 @@ func (k *KubernetesAdapter) GenerateStandardManifests(spec *config.AppSpec) (str
 		image = fmt.Sprintf("%s:latest", spec.Name)
 	}
 
-	cpuReq := spec.Runtime.Resources.CPU.Request
+	cpuReq := config.NormalizeKubernetesCPU(spec.Runtime.Resources.CPU.Request)
 	if cpuReq == "" {
 		cpuReq = "100m"
 	}
-	memReq := spec.Runtime.Resources.Memory.Request
+	memReq := config.NormalizeKubernetesMemory(spec.Runtime.Resources.Memory.Request)
 	if memReq == "" {
 		memReq = "128Mi"
 	}
-	cpuLim := spec.Runtime.Resources.CPU.Limit
+	cpuLim := config.NormalizeKubernetesCPU(spec.Runtime.Resources.CPU.Limit)
 	if cpuLim == "" {
 		cpuLim = "500m"
 	}
-	memLim := spec.Runtime.Resources.Memory.Limit
+	memLim := config.NormalizeKubernetesMemory(spec.Runtime.Resources.Memory.Limit)
 	if memLim == "" {
 		memLim = "512Mi"
 	}

@@ -92,6 +92,7 @@ Builds OCI-compliant container images using automatic mode resolution across sin
 - `--service <name[,name...]>` — Filter to specific service(s) in compose or discover mode (repeatable or comma-separated)
 - `-t`, `--tag <image:tag>` — Override target OCI image tag (single-service builds or when filtered to 1 service via `--service`)
 - `--save` — Persist the built image tag into `skipper.yaml` (single-service mode only)
+- `--dry-run` — Preview detected stack, build commands, and synthesized Dockerfiles without building or writing files
 - Supports global `--format json` (single-service emits `{"service","image","status","saved"}`; multi-service emits `{"project","mode","results":[...]}`; build logs route to stderr in JSON mode)
 
 ```bash
@@ -135,6 +136,7 @@ Starts a single-service workload (`-r docker` or `-r kubernetes`) or a multi-ser
 - `--compose <path>` — Path to a Docker Compose file for multi-service startup
 - `--service <name[,name...]>` — Filter to specific Compose service(s) (repeatable or comma-separated; validated against the Compose project)
 - `--build` — Rebuild Compose service images before starting (`docker compose up -d --build`)
+- `--dry-run` — Preview containers, networks, volumes, or Kubernetes manifests that would be created without executing
 - Supports global `--format json` (routes progress to stderr; Compose mode emits `{"mode":"compose","project":"...","file":"...","services":[...]}`)
 
 ```bash
@@ -167,14 +169,17 @@ Stops and removes a single-service workload (`skipper down [name]`, running `doc
 **Flags:**
 - `--compose <path>` — Path to a Docker Compose file for multi-service teardown
 - `-v`, `--volumes` — Remove named volumes declared in the Compose file (`docker compose down -v --remove-orphans`)
-- Supports global `--format json` (Compose mode emits `{"mode":"compose","project":"...","file":"...","status":"STOPPED","volumesRemoved":<bool>}`)
+- `--dry-run` — Preview exact containers, networks, and volumes (including preserved vs deleted volumes) that would be stopped or removed without executing
+- Supports global `--format json` (Compose mode emits `{"mode":"compose","project":"...","file":"...","status":"STOPPED","volumesRemoved":<bool>}`; `--dry-run` adds `"dryRun": true` and resource lists)
 
 ```bash
-# Single-service stop
+# Single-service stop (or preview first)
+$ skipper down --dry-run
 $ skipper down
 $ skipper down payment-api
 
 # Compose stack teardown (auto-detected or explicit)
+$ skipper down -v --dry-run
 $ skipper down
 $ skipper down --compose docker-compose.yml --volumes --format json
 ```
@@ -287,7 +292,7 @@ Forwarding from 127.0.0.1:8080 -> 8080
 ```
 
 ### `skipper import compose`
-Translates `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml` files into native `skipper.yaml` with production-hardened defaults (supports long-syntax ports/volumes, build args/target, and environment lookups). Supports `--format json` (`{"sourceFile","targetFile","service","spec"}`).
+Translates `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml` files into native `skipper.yaml` with production-hardened defaults (supports long-syntax ports/volumes, build args/target, environment lookups, and automatic normalization of Docker/Compose units such as `512m`/`512mb`/`1g` memory and `0.5` CPUs into Kubernetes quantities `512Mi`/`1Gi`/`500m`). Supports `--format json` (`{"sourceFile","targetFile","service","spec"}`).
 
 **Flags:**
 - `--service <name>` — Specific service in the Compose file to transpile (if omitted, selects the first buildable service alphabetically)
@@ -324,6 +329,8 @@ Evaluates platform governance policies and executes progressive rollout strategi
 **Flags:**
 - `-s`, `--strategy <canary|blue-green>` — Rollout strategy (default: `canary`)
 - `--auto-rollback` — Automatically rollback on health gate failure (default: `true`)
+- `-i`, `--image <image:tag>` — Override target OCI image tag for this deployment
+- `--dry-run` — Validate governance policies and preview progressive rollout plan without executing
 
 ```bash
 # Canary rollout with automatic rollback
@@ -410,6 +417,7 @@ Manages ephemeral local development Kubernetes clusters using Kind. All subcomma
 
 **Flags:**
 - `--name <string>` — Local cluster name (default: `skipper-dev`)
+- `--dry-run` — Available on `init` and `destroy` to preview cluster creation or deletion resources without executing
 
 ```bash
 $ skipper local init --name my-dev-cluster

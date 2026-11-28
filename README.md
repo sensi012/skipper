@@ -78,7 +78,7 @@ When a directory has no `Dockerfile`, `skipper build` auto-detects your stack:
 
 ## Built for Developers & AI Agents
 
-- **Global `--format json`**: Emits clean, machine-parsable JSON on `stdout` while routing progress banners to `stderr`.
+- **Global `--format json` & `--dry-run`**: Emits clean, machine-parsable JSON on `stdout` while routing progress banners to `stderr`, and previews exact create/stop/delete plans across `build`, `up`, `down`, `deploy`, `rollback`, `local`, `sign`, and `debug --ephemeral` before anything happens.
 - **Actionable Remediations**: Diagnostic and policy failures return a structured `remediationCmd`.
 - **Official MCP Server & Introspection**: `skipper mcp` exposes 10 operational tools over stdio, and `skipper explain --schema` outputs the embedded `skipper.yaml` JSON Schema. See [CLI Reference Manual](docs/cli-reference.md#ai-agent-integration--mcp-server).
 

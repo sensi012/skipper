@@ -466,6 +466,10 @@ func TestResourceParsers(t *testing.T) {
 		wantErr bool
 	}{
 		{"512Mi", 512, false},
+		{"512m", 512, false},
+		{"512mb", 512, false},
+		{"1g", 1024, false},
+		{"1GiB", 1024, false},
 		{"2Gi", 2048, false},
 		{"1024Ki", 1, false},
 		{"1048576", 1, false},

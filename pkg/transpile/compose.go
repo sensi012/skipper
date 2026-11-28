@@ -15,6 +15,8 @@ type ComposeFile struct {
 	Name     string                    `yaml:"name,omitempty"`
 	Version  string                    `yaml:"version,omitempty"`
 	Services map[string]ComposeService `yaml:"services"`
+	Volumes  map[string]interface{}    `yaml:"volumes,omitempty"`
+	Networks map[string]interface{}    `yaml:"networks,omitempty"`
 }
 
 type ComposeService struct {
@@ -158,13 +160,46 @@ func serviceToSpec(name string, svc ComposeService, buildCfg config.BuildConfig,
 		})
 	}
 
-	// Deploy limits
+	// Deploy limits & reservations (normalized into valid Kubernetes Quantities)
 	if svc.Deploy != nil && svc.Deploy.Replicas > 0 {
 		spec.Runtime.Replicas.Min = svc.Deploy.Replicas
 	}
+	hasExplicitMemReq := false
+	hasExplicitCPUReq := false
+	if svc.Deploy != nil && svc.Deploy.Resources != nil && svc.Deploy.Resources.Reservations != nil {
+		res := svc.Deploy.Resources.Reservations
+		if res.Memory != "" {
+			spec.Runtime.Resources.Memory.Request = config.NormalizeKubernetesMemory(res.Memory)
+			hasExplicitMemReq = true
+		}
+		if res.Cpus != "" {
+			spec.Runtime.Resources.CPU.Request = config.NormalizeKubernetesCPU(res.Cpus)
+			hasExplicitCPUReq = true
+		}
+	}
 	if svc.Deploy != nil && svc.Deploy.Resources != nil && svc.Deploy.Resources.Limits != nil {
-		if svc.Deploy.Resources.Limits.Memory != "" {
-			spec.Runtime.Resources.Memory.Limit = svc.Deploy.Resources.Limits.Memory
+		lim := svc.Deploy.Resources.Limits
+		if lim.Memory != "" {
+			normMem := config.NormalizeKubernetesMemory(lim.Memory)
+			spec.Runtime.Resources.Memory.Limit = normMem
+			if !hasExplicitMemReq {
+				limBytes, okLim := config.MemoryBytesApprox(normMem)
+				reqBytes, okReq := config.MemoryBytesApprox(spec.Runtime.Resources.Memory.Request)
+				if okLim && okReq && limBytes < reqBytes {
+					spec.Runtime.Resources.Memory.Request = normMem
+				}
+			}
+		}
+		if lim.Cpus != "" {
+			normCPU := config.NormalizeKubernetesCPU(lim.Cpus)
+			spec.Runtime.Resources.CPU.Limit = normCPU
+			if !hasExplicitCPUReq {
+				limMilli, okLim := config.CPUMillicoresApprox(normCPU)
+				reqMilli, okReq := config.CPUMillicoresApprox(spec.Runtime.Resources.CPU.Request)
+				if okLim && okReq && limMilli < reqMilli {
+					spec.Runtime.Resources.CPU.Request = normCPU
+				}
+			}
 		}
 	}
 

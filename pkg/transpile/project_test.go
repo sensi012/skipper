@@ -281,6 +281,49 @@ services:
 			}
 		}
 	})
+
+	t.Run("extracts volumes and networks with default, custom, and external names", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("CUSTOM_VOL", "shared_pg")
+		composeYAML := `
+name: shop
+services:
+  db:
+    image: postgres:16
+volumes:
+  pgdata:
+  custom_data:
+    name: ${CUSTOM_VOL}
+  legacy_ext:
+    external: true
+networks:
+  backend:
+  shared:
+    external: true
+    name: corp_shared
+`
+		p := filepath.Join(dir, "compose.yaml")
+		_ = os.WriteFile(p, []byte(composeYAML), 0644)
+		proj, err := LoadComposeProject(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(proj.Volumes) != 3 {
+			t.Fatalf("expected 3 volumes, got %+v", proj.Volumes)
+		}
+		if proj.Volumes[0].Key != "custom_data" || proj.Volumes[0].Name != "shared_pg" || proj.Volumes[0].External {
+			t.Errorf("unexpected custom volume: %+v", proj.Volumes[0])
+		}
+		if proj.Volumes[1].Key != "legacy_ext" || proj.Volumes[1].Name != "legacy_ext" || !proj.Volumes[1].External {
+			t.Errorf("unexpected external volume: %+v", proj.Volumes[1])
+		}
+		if proj.Volumes[2].Key != "pgdata" || proj.Volumes[2].Name != "shop_pgdata" || proj.Volumes[2].External {
+			t.Errorf("unexpected default volume: %+v", proj.Volumes[2])
+		}
+		if len(proj.Networks) != 2 || proj.Networks[0].Name != "shop_backend" || proj.Networks[1].Name != "corp_shared" || !proj.Networks[1].External {
+			t.Errorf("unexpected networks: %+v", proj.Networks)
+		}
+	})
 }
 
 func TestTranspileComposeDeterministicSelection(t *testing.T) {
