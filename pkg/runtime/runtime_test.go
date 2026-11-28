@@ -751,11 +751,25 @@ func TestBuildDockerPlansAndK8sUnitNormalization(t *testing.T) {
 	}
 
 	k := NewKubernetesAdapter("prod")
+	spec.Env = []config.EnvVar{
+		{Name: "APP_ENV", Value: "production"},
+	}
+	spec.Security.ReadOnlyRootFilesystem = true
 	yamlOut, err := k.GenerateStandardManifests(spec)
 	if err != nil {
 		t.Fatalf("GenerateStandardManifests failed: %v", err)
 	}
-	for _, want := range []string{"cpu: 250m", "memory: 256Mi", "cpu: 1500m", "memory: 1Gi"} {
+	for _, want := range []string{
+		"cpu: 250m",
+		"memory: 256Mi",
+		"cpu: 1500m",
+		"memory: 1Gi",
+		"name: APP_ENV",
+		`value: "production"`,
+		"readOnlyRootFilesystem: true",
+		"mountPath: /tmp",
+		"emptyDir: {}",
+	} {
 		if !strings.Contains(yamlOut, want) {
 			t.Errorf("expected %q in generated K8s manifest:\n%s", want, yamlOut)
 		}

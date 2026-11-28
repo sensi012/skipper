@@ -185,10 +185,20 @@ runtime:
 EOF
 
   cd "${k8s_dir}"
-  echo "--- 1. manifest ---"
+  echo "--- 1. manifest + server dry-run ---"
   "${SKIPPER_ABS}" manifest --format json >"${OUT_DIR}/k8s-manifest.json"
   validate_json_file "${OUT_DIR}/k8s-manifest.json"
   grep -q "Deployment" "${OUT_DIR}/k8s-manifest.json"
+  "${SKIPPER_ABS}" manifest | kubectl apply --dry-run=server -f -
+
+  echo "--- 1b. up --dry-run (nothing created) ---"
+  "${SKIPPER_ABS}" up -r kubernetes -n default --dry-run --format json >"${OUT_DIR}/k8s-up-dry.json"
+  validate_json_file "${OUT_DIR}/k8s-up-dry.json"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("dryRun") is True and "Deployment/k8s-smoke" in d.get("resources", []), d' "${OUT_DIR}/k8s-up-dry.json"
+  if kubectl get deployment k8s-smoke -n default >/dev/null 2>&1; then
+    echo "ERROR: k8s up --dry-run created deployment unexpectedly" >&2
+    return 1
+  fi
 
   echo "--- 2. up v1 (1.27-alpine) ---"
   "${SKIPPER_ABS}" up -r kubernetes -n default --format json >"${OUT_DIR}/k8s-up-v1.json"
@@ -219,6 +229,12 @@ EOF
   img_rb="$(kubectl get deployment k8s-smoke -n default -o jsonpath="{.spec.template.spec.containers[0].image}")"
   [ "${img_rb}" = "nginxinc/nginx-unprivileged:1.27-alpine" ]
 
+  echo "--- 5b. down --dry-run (replicas preserved) ---"
+  "${SKIPPER_ABS}" down -r kubernetes k8s-smoke -n default --dry-run --format json >"${OUT_DIR}/k8s-down-dry.json"
+  validate_json_file "${OUT_DIR}/k8s-down-dry.json"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("dryRun") is True, d' "${OUT_DIR}/k8s-down-dry.json"
+  [ "$(kubectl get deployment k8s-smoke -n default -o jsonpath="{.spec.replicas}")" = "1" ]
+
   echo "--- 6. down ---"
   "${SKIPPER_ABS}" down -r kubernetes k8s-smoke -n default --format json >"${OUT_DIR}/k8s-down.json"
   validate_json_file "${OUT_DIR}/k8s-down.json"
@@ -231,6 +247,37 @@ EOF
     sleep 1
   done
   [ "${reps}" = "0" ]
+
+  echo "--- 7. compose M/Mi import -> K8s kind deploy ---"
+  local cmp_dir="${TMP_WORK}/k8s-compose-mem"
+  mkdir -p "${cmp_dir}"
+  cat >"${cmp_dir}/docker-compose.yml" <<'EOF'
+services:
+  web:
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128m
+        reservations:
+          cpus: "0.1"
+          memory: 64mb
+EOF
+  cd "${cmp_dir}"
+  "${SKIPPER_ABS}" import compose docker-compose.yml --format json >"${OUT_DIR}/k8s-compose-import.json"
+  validate_json_file "${OUT_DIR}/k8s-compose-import.json"
+  grep -q "128Mi" "${cmp_dir}/skipper.yaml"
+  grep -q "64Mi" "${cmp_dir}/skipper.yaml"
+  grep -q "500m" "${cmp_dir}/skipper.yaml"
+  grep -q "100m" "${cmp_dir}/skipper.yaml"
+  "${SKIPPER_ABS}" up -r kubernetes -n default --format json >"${OUT_DIR}/k8s-compose-up.json"
+  validate_json_file "${OUT_DIR}/k8s-compose-up.json"
+  kubectl rollout status deployment/web -n default --timeout=120s
+  "${SKIPPER_ABS}" down -r kubernetes web -n default --format json >"${OUT_DIR}/k8s-compose-down.json"
+  validate_json_file "${OUT_DIR}/k8s-compose-down.json"
 }
 
 if run_isolated run_k8s_lifecycle "${C2_LOG}"; then
@@ -380,6 +427,66 @@ if run_isolated run_sigint_check "${C3C_LOG}"; then
 else
   cat "${C3C_LOG}" || true
   record_result "3c: SIGINT mid-build ergonomics" "FAIL" "See ${C3C_LOG}"
+fi
+
+# -----------------------------------------------------------------------------
+# Check 4: Dry-run safety across Compose stack and named volumes
+# -----------------------------------------------------------------------------
+C4_LOG="${OUT_DIR}/check-4-dryrun-safety.log"
+run_dryrun_safety_check() {
+  local dc_dir="${TMP_WORK}/dryrun-compose"
+  mkdir -p "${dc_dir}"
+  cat >"${dc_dir}/docker-compose.yml" <<'EOF'
+name: drycheck
+services:
+  cache:
+    image: alpine:3.20
+    command: ["sleep", "120"]
+    volumes:
+      - cache_data:/data
+volumes:
+  cache_data:
+EOF
+  trap 'docker compose -f "'"${dc_dir}/docker-compose.yml"'" down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+
+  docker pull -q alpine:3.20 >/dev/null
+  cd "${dc_dir}"
+
+  echo "--- 4a. skipper up --dry-run creates nothing ---"
+  "${SKIPPER_ABS}" up --dry-run --format json >"${OUT_DIR}/4a-up-dry.json"
+  validate_json_file "${OUT_DIR}/4a-up-dry.json"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("dryRun") is True, d' "${OUT_DIR}/4a-up-dry.json"
+  [ -z "$(docker ps -aq --filter label=com.docker.compose.project=drycheck)" ]
+
+  echo "--- 4b. live skipper up creates container and volume ---"
+  "${SKIPPER_ABS}" up --format json >"${OUT_DIR}/4b-up-live.json"
+  validate_json_file "${OUT_DIR}/4b-up-live.json"
+  local cid
+  cid="$(docker ps -q --filter label=com.docker.compose.project=drycheck)"
+  [ -n "${cid}" ]
+  docker volume inspect drycheck_cache_data >/dev/null
+
+  echo "--- 4c. skipper down -v --dry-run leaves container and volume intact ---"
+  "${SKIPPER_ABS}" down -v --dry-run --format json >"${OUT_DIR}/4c-down-dry.json"
+  validate_json_file "${OUT_DIR}/4c-down-dry.json"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("dryRun") is True and "drycheck_cache_data" in d.get("volumesToDelete", []), d' "${OUT_DIR}/4c-down-dry.json"
+  [ "$(docker inspect -f '{{.State.Running}}' "${cid}")" = "true" ]
+  docker volume inspect drycheck_cache_data >/dev/null
+
+  echo "--- 4d. live skipper down -v removes container and volume ---"
+  "${SKIPPER_ABS}" down -v --format json >"${OUT_DIR}/4d-down-live.json"
+  validate_json_file "${OUT_DIR}/4d-down-live.json"
+  [ -z "$(docker ps -aq --filter label=com.docker.compose.project=drycheck)" ]
+  if docker volume inspect drycheck_cache_data >/dev/null 2>&1; then
+    echo "ERROR: drycheck_cache_data volume still exists after live down -v" >&2
+    return 1
+  fi
+}
+if run_isolated run_dryrun_safety_check "${C4_LOG}"; then
+  record_result "4: Dry-run safety (Compose & volumes)" "PASS" "up/down -v --dry-run preserved container & volume"
+else
+  cat "${C4_LOG}" || true
+  record_result "4: Dry-run safety (Compose & volumes)" "FAIL" "See ${C4_LOG}"
 fi
 
 # -----------------------------------------------------------------------------

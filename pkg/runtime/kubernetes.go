@@ -261,6 +261,12 @@ func (k *KubernetesAdapter) GenerateStandardManifests(spec *config.AppSpec) (str
 	buf.WriteString("      securityContext:\n        runAsNonRoot: true\n      containers:\n")
 	buf.WriteString(fmt.Sprintf("      - name: %s\n        image: %s\n", spec.Name, image))
 
+	if spec.Security.ReadOnlyRootFilesystem {
+		buf.WriteString("        securityContext:\n")
+		buf.WriteString("          allowPrivilegeEscalation: false\n")
+		buf.WriteString("          readOnlyRootFilesystem: true\n")
+	}
+
 	if len(spec.Endpoints) > 0 {
 		buf.WriteString("        ports:\n")
 		for _, ep := range spec.Endpoints {
@@ -268,8 +274,30 @@ func (k *KubernetesAdapter) GenerateStandardManifests(spec *config.AppSpec) (str
 		}
 	}
 
+	var envLines []string
+	for _, env := range spec.Env {
+		if env.Value != "" {
+			envLines = append(envLines, fmt.Sprintf("        - name: %s\n          value: %q\n", env.Name, env.Value))
+		}
+	}
+	if len(envLines) > 0 {
+		buf.WriteString("        env:\n")
+		for _, line := range envLines {
+			buf.WriteString(line)
+		}
+	}
+
 	// Resources
 	buf.WriteString(fmt.Sprintf("        resources:\n          requests:\n            cpu: %s\n            memory: %s\n          limits:\n            cpu: %s\n            memory: %s\n", cpuReq, memReq, cpuLim, memLim))
+
+	if spec.Security.ReadOnlyRootFilesystem {
+		buf.WriteString("        volumeMounts:\n")
+		buf.WriteString("        - name: tmp\n")
+		buf.WriteString("          mountPath: /tmp\n")
+		buf.WriteString("      volumes:\n")
+		buf.WriteString("      - name: tmp\n")
+		buf.WriteString("        emptyDir: {}\n")
+	}
 
 	// 2. Service if endpoints are defined
 	if len(spec.Endpoints) > 0 {

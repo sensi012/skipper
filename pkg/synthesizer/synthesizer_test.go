@@ -154,3 +154,81 @@ func TestSynthesizeNormalizesDockerMemoryAndCPUUnits(t *testing.T) {
 		}
 	}
 }
+
+func TestSynthesizeTmpVolumeAndHealthProbes(t *testing.T) {
+	synth := NewSynthesizer()
+
+	t.Run("mounts emptyDir /tmp and falls back to tcpSocket probes when Health is unset", func(t *testing.T) {
+		spec := &config.AppSpec{
+			Name: "nginx-web",
+			Endpoints: []config.EndpointConfig{
+				{Name: "http", Port: 8080, Protocol: "TCP"},
+			},
+		}
+		bundle, err := synth.Synthesize(spec, "default")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, want := range []string{
+			"readOnlyRootFilesystem: true",
+			"mountPath: /tmp",
+			"emptyDir: {}",
+			"tcpSocket:",
+			"port: 8080",
+		} {
+			if !strings.Contains(bundle.Deployment, want) {
+				t.Errorf("expected %q in deployment:\n%s", want, bundle.Deployment)
+			}
+		}
+		if strings.Contains(bundle.Deployment, "/healthz") || strings.Contains(bundle.Deployment, "/livez") {
+			t.Errorf("did not expect hardcoded /healthz or /livez without spec.Health:\n%s", bundle.Deployment)
+		}
+	})
+
+	t.Run("honors custom startup, readiness, and liveness HTTP probes", func(t *testing.T) {
+		spec := &config.AppSpec{
+			Name: "custom-api",
+			Endpoints: []config.EndpointConfig{
+				{Name: "http", Port: 8080, Protocol: "TCP"},
+			},
+			Health: config.HealthConfig{
+				Startup: &config.ProbeConfig{
+					Path:                "/boot",
+					Port:                9000,
+					InitialDelaySeconds: 2,
+					PeriodSeconds:       5,
+					FailureThreshold:    12,
+				},
+				Readiness: &config.ProbeConfig{
+					Path:                "/ready",
+					InitialDelaySeconds: 3,
+					PeriodSeconds:       8,
+					TimeoutSeconds:      2,
+				},
+				Liveness: &config.ProbeConfig{
+					Path:                "/health",
+					InitialDelaySeconds: 15,
+					PeriodSeconds:       20,
+				},
+			},
+		}
+		bundle, err := synth.Synthesize(spec, "prod")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, want := range []string{
+			"startupProbe:",
+			"path: /boot",
+			"port: 9000",
+			"failureThreshold: 12",
+			"path: /ready",
+			"timeoutSeconds: 2",
+			"path: /health",
+			"port: 8080",
+		} {
+			if !strings.Contains(bundle.Deployment, want) {
+				t.Errorf("expected %q in custom-probe deployment:\n%s", want, bundle.Deployment)
+			}
+		}
+	})
+}
