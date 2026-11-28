@@ -420,7 +420,7 @@ func renderNativeSBOM(target string, format SBOMFormat, components []SBOMCompone
 			"metadata": map[string]interface{}{
 				"timestamp": now,
 				"tools": []map[string]string{
-					{"vendor": "skipper", "name": "skipper-native", "version": "0.1.0"},
+					{"vendor": "skipper", "name": "skipper-native", "version": "0.1.1"},
 				},
 				"component": map[string]string{
 					"type": "application",
@@ -471,7 +471,7 @@ func renderNativeSBOM(target string, format SBOMFormat, components []SBOMCompone
 			"documentNamespace": fmt.Sprintf("https://skipper.dev/spdx/%s", sanitizeSPDXName(target)),
 			"creationInfo": map[string]interface{}{
 				"created":  now,
-				"creators": []string{"Tool: skipper-native-0.1.0"},
+				"creators": []string{"Tool: skipper-native-0.1.1"},
 			},
 			"packages": pkgs,
 		}
