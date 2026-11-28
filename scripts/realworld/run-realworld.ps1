@@ -712,49 +712,119 @@ for ($idx = 0; $idx -lt $entries.Count; $idx++) {
         }
     } else {
         $url = [string]$entry.url
-        $cloneArgs = @("clone", "--depth", "1")
-        if ($null -ne $entry.ref -and -not [string]::IsNullOrWhiteSpace([string]$entry.ref)) {
-            $cloneArgs += @("--branch", [string]$entry.ref)
-        }
         $hasSubdir = ($null -ne $entry.subdir -and -not [string]::IsNullOrWhiteSpace([string]$entry.subdir))
-        if ($hasSubdir) {
-            $cloneArgs += @("--filter=blob:none", "--sparse")
-        }
-        $cloneArgs += @($url, $cloneRoot)
+        $hasCommit = ($null -ne $entry.commit -and -not [string]::IsNullOrWhiteSpace([string]$entry.commit))
 
-        $prevPref = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        $cloneOutput = & git @cloneArgs 2>&1
-        $gitExit = $LASTEXITCODE
-        $ErrorActionPreference = $prevPref
-
-        if ($gitExit -ne 0) {
-            $cloneOk = $false
-            $cloneErr = ("git clone failed: " + (Get-FirstErrorLine -Text ($cloneOutput -join "`n")))
-        } elseif ($hasSubdir) {
-            $sub = [string]$entry.subdir
+        if ($hasCommit) {
+            $commitSha = ([string]$entry.commit).Trim()
             $prevPref = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
-            $sparseOut = & git -C $cloneRoot sparse-checkout set $sub 2>&1
-            $sparseExit = $LASTEXITCODE
+            $initOut = & git -C $cloneRoot init -q 2>&1
+            $initExit = $LASTEXITCODE
             $ErrorActionPreference = $prevPref
-            if ($sparseExit -ne 0) {
+            if ($initExit -ne 0) {
                 $cloneOk = $false
-                $cloneErr = ("git sparse-checkout failed: " + (Get-FirstErrorLine -Text ($sparseOut -join "`n")))
+                $cloneErr = ("git init failed: " + (Get-FirstErrorLine -Text ($initOut -join "`n")))
             } else {
-                $relParts = $sub -split "[\\/]"
-                $resolvedSub = $cloneRoot
-                foreach ($part in $relParts) {
-                    if ($part -ne "") {
-                        $resolvedSub = Join-Path $resolvedSub $part
+                if ($hasSubdir) {
+                    $sub = [string]$entry.subdir
+                    $prevPref = $ErrorActionPreference
+                    $ErrorActionPreference = "Continue"
+                    $scInitOut = & git -C $cloneRoot sparse-checkout init --cone 2>&1
+                    $scInitExit = $LASTEXITCODE
+                    if ($scInitExit -eq 0) {
+                        $scSetOut = & git -C $cloneRoot sparse-checkout set $sub 2>&1
+                        $scSetExit = $LASTEXITCODE
+                    } else {
+                        $scSetOut = @()
+                        $scSetExit = $scInitExit
+                    }
+                    $ErrorActionPreference = $prevPref
+                    if ($scInitExit -ne 0) {
+                        $cloneOk = $false
+                        $cloneErr = ("git sparse-checkout init failed: " + (Get-FirstErrorLine -Text ($scInitOut -join "`n")))
+                    } elseif ($scSetExit -ne 0) {
+                        $cloneOk = $false
+                        $cloneErr = ("git sparse-checkout set failed: " + (Get-FirstErrorLine -Text ($scSetOut -join "`n")))
                     }
                 }
-                if (-not (Test-Path $resolvedSub)) {
-                    $cloneOk = $false
-                    $cloneErr = ("subdir not found after sparse checkout: " + $sub)
-                } else {
-                    $projectDir = $resolvedSub
+
+                if ($cloneOk) {
+                    $fetchArgs = @("-C", $cloneRoot, "fetch", "--depth", "1")
+                    if ($hasSubdir) {
+                        $fetchArgs += "--filter=blob:none"
+                    }
+                    $fetchArgs += @($url, $commitSha)
+
+                    $prevPref = $ErrorActionPreference
+                    $ErrorActionPreference = "Continue"
+                    $fetchOut = & git @fetchArgs 2>&1
+                    $fetchExit = $LASTEXITCODE
+                    if ($fetchExit -eq 0) {
+                        $coOut = & git -C $cloneRoot checkout -q --detach FETCH_HEAD 2>&1
+                        $coExit = $LASTEXITCODE
+                    } else {
+                        $coOut = @()
+                        $coExit = $fetchExit
+                    }
+                    $ErrorActionPreference = $prevPref
+
+                    if ($fetchExit -ne 0) {
+                        $cloneOk = $false
+                        $cloneErr = ("git fetch commit failed: " + (Get-FirstErrorLine -Text ($fetchOut -join "`n")))
+                    } elseif ($coExit -ne 0) {
+                        $cloneOk = $false
+                        $cloneErr = ("git checkout FETCH_HEAD failed: " + (Get-FirstErrorLine -Text ($coOut -join "`n")))
+                    }
                 }
+            }
+        } else {
+            $cloneArgs = @("clone", "--depth", "1")
+            if ($null -ne $entry.ref -and -not [string]::IsNullOrWhiteSpace([string]$entry.ref)) {
+                $cloneArgs += @("--branch", [string]$entry.ref)
+            }
+            if ($hasSubdir) {
+                $cloneArgs += @("--filter=blob:none", "--sparse")
+            }
+            $cloneArgs += @($url, $cloneRoot)
+
+            $prevPref = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $cloneOutput = & git @cloneArgs 2>&1
+            $gitExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevPref
+
+            if ($gitExit -ne 0) {
+                $cloneOk = $false
+                $cloneErr = ("git clone failed: " + (Get-FirstErrorLine -Text ($cloneOutput -join "`n")))
+            } elseif ($hasSubdir) {
+                $sub = [string]$entry.subdir
+                $prevPref = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                $sparseOut = & git -C $cloneRoot sparse-checkout set $sub 2>&1
+                $sparseExit = $LASTEXITCODE
+                $ErrorActionPreference = $prevPref
+                if ($sparseExit -ne 0) {
+                    $cloneOk = $false
+                    $cloneErr = ("git sparse-checkout failed: " + (Get-FirstErrorLine -Text ($sparseOut -join "`n")))
+                }
+            }
+        }
+
+        if ($cloneOk -and $hasSubdir) {
+            $sub = [string]$entry.subdir
+            $relParts = $sub -split "[\\/]"
+            $resolvedSub = $cloneRoot
+            foreach ($part in $relParts) {
+                if ($part -ne "") {
+                    $resolvedSub = Join-Path $resolvedSub $part
+                }
+            }
+            if (-not (Test-Path $resolvedSub)) {
+                $cloneOk = $false
+                $cloneErr = ("subdir not found after sparse checkout: " + $sub)
+            } else {
+                $projectDir = $resolvedSub
             }
         }
     }
