@@ -10,10 +10,11 @@
   {
     "name": "awesome-nginx-nodejs-redis",
     "url": "https://github.com/docker/awesome-compose.git",
+    "commit": "667bd9facba316a64c0697dc55fa097f973c07b0",
     "subdir": "nginx-nodejs-redis",
     "kind": "compose",
     "expect": "pass",
-    "notes": "3-tier Nginx + 2x Express + Redis Compose stack"
+    "notes": "3-tier Nginx + 2x Express + Redis Compose stack (pinned pre-#748 npm 6 ignore-scripts regression)"
   },
   {
     "name": "awesome-fastapi",
